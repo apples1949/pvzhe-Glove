@@ -3,7 +3,7 @@
 在**除「我是僵尸 / 我是僵尸大冒险」以外**的关卡里自动启用游戏自带的**搬运手套**。
 原版手套只在调试开关（`CommandManager.debugOpenGlove`）下才会出现，本 Mod 把它做成了正常玩法。
 
-- mod id：`glove`　name：`手套`　version：`1.0.4`
+- mod id：`glove`　name：`手套`　version：`1.0.5`
 - 程序集身份：`JTYGlove`（包内固定路径 `Runtime/ModAssembly.dll`）
 - 入口类型：`GloveEntry`
 
@@ -13,8 +13,8 @@
 |---|---|
 | 启用手套 | 战斗中轮询：`currentLevelConfig != null`、非 IZM/IZM2、`GetGloveFeature() == null` ⇒ `control.AddFeature("Glove", new Dictionary())`，随后**补跑** `GameInit()` / `GameStart()`（战斗中途加入时游戏不会替我们跑这两步）。幂等、失败只 Warn 一次。 |
 | IZM 排除 | `TowerDefenseManager.IsIZMMode()` / `IsIZM2Mode()` 为真 ⇒ **完全不动**（与游戏自己 `GloveManager._Input` 的排除条件逐字一致）。 |
-| 横/竖版位置 | 视口宽 > 高 = 横版（用 `landMode/landX/landY`）；高 >= 宽 = 竖版（用 `portMode/portX/portY`）。`auto` = 保持游戏原位置；`tl…br` = 九宫格；`custom` = 百分比坐标。 |
-| 战斗设置页 | Mod 按钮列（`ModCol4`，与其它 Mod 入口同列）注入「手套·按钮位置」→ 打开**本 Mod 独占**浮层面板，内含「横版 · 位置」「竖版 · 位置」两行（共享组件 `PosEditorRow.PanelSpec`）。改动即时生效 + 写配置。 |
+| 按钮位置（v1.0.5：只有一套） | **横屏竖屏通用**一套 `landMode/landX/landY`。`auto` = 保持游戏原位置；`tl…br` = 九宫格；`custom` = 百分比坐标。v1.0.5 已删掉原来「竖版」那套设置（玩家反馈无效）。 |
+| 战斗设置页 | Mod 按钮列（`ModCol4`，与其它 Mod 入口同列）注入「手套·按钮位置」→ 打开**本 Mod 独占**浮层面板，内含**一行**「位置」（共享组件 `PosEditorRow.PanelSpec`）。改动即时生效 + 写配置。 |
 | 收款码 | 每帧 `SponsorQrInjector.Tick(tree, "手套", PackageRoot, "Resources/SponsorQR.png")`；`aboutAuthor` 首行以 `手套` 逐字开头（注入器靠它判定归属）。 |
 | ★ 手套模式抑制全场植物点击（v1.0.4） | `glovePick == true` 期间，**全场植物**的 `MousePressComponent` 一律 `SetAlive(false)`（激活时扫全场、每 3 帧补悬停那株、每 0.5s 重扫），关闭/换关/卸载全部还原 ⇒ 泡椒罐子、加农炮不会被「拿起」或「放下」那一次点击触发。刚放下的那一株额外留 0.25s 窗口；拿起瞬间还会撤销植物身上可能已触发的 `pressed` / `pressAwait`。 |
 | ★ 预览用本体外观（v1.0.3） | 拖动预览不再是「按 config.name 重造默认外观」，而是 `pickedCharacter.sprite.Duplicate()` 的克隆（并补齐 `flashAnimeData` / `atlasProfileOverride` / `mediaReplaceAtlas*` 等非导出状态）⇒ 毁灭加农炮等变体显示本体外观；克隆不可用会自动回退宿主默认预览并告警。 |
@@ -129,7 +129,7 @@ v1.0.1 曾用 RenderingServer 自绘绿色半透明格 + 琥珀源格框，玩�
 
 ## 配置项（全部 immediate / affectsGameplay=false）
 
-`enabled`、`landMode`+`landX`+`landY`、`portMode`+`portX`+`portY`、`shovelWhiteMask`、`enableLog`、
+`enabled`、`landMode`+`landX`+`landY`（唯一一套位置）、`shovelWhiteMask`、`enableLog`、
 `aboutChangelog`、`aboutAuthor`。
 
 ## 构建 / 装机
@@ -151,7 +151,8 @@ python mods/_build_locked.py Glove --install
 ## 仍待实机验证
 
 1. 普通关卡里手套按钮是否正常出现、点击可进入搬运模式（拿起 / 放下植物）。
-2. 自定义位置（九宫格 / 百分比）在横版与竖版下是否都落点正确；窗口拉伸 / 手机旋转后是否跟随。
+2. 自定义位置（九宫格 / 百分比）在横屏与竖屏下是否都落点正确；窗口拉伸 / 手机旋转后是否跟随。
+   （v1.0.5 起只有一套设置，横竖屏共用；面板里也不再有「竖版」那一行。）
 3. reparent 后按钮点击、`gloveSprite` 图标切换、拖拽时「手套影子」跟随是否正常。
 4. IZM / IZM2 关卡是否**确实没有**手套（且没有报错日志）。
 5. 战斗设置页「手套·按钮位置」面板两行的即时生效与配置持久化。

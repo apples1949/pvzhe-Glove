@@ -10,12 +10,12 @@ using PVZHE.ModEditor.ModSystem;
 /// 1. **启用手套**：在**非**「我是僵尸」(IZM)、**非**「我是僵尸大冒险」(IZM2) 的关卡里，
 ///    自动启用手套（游戏自带的"搬植物"手套）。IZM / IZM2 必须保持原样（不启用）。
 /// 2. **配置**（mod.json settings，全部 immediate / affectsGameplay=false）：
-///    enabled 总开关、landMode+landX+landY（**横版**用）、portMode+portX+portY（**竖版**用）、
+///    enabled 总开关、landMode+landX+landY（**唯一一套**按钮位置，横竖屏通用）、
 ///    enableLog、aboutChangelog、aboutAuthor。
-/// 3. **横竖版判定 + 百分比定位**：视口宽 &gt; 高 = 横版，高 &gt;= 宽 = 竖版；
-///    九宫格锚点（tl/tc/tr/ml/mc/mr/bl/bc/br）+ custom 百分比坐标 + auto（保持游戏原位置）。
+/// 3. **百分比定位**：九宫格锚点（tl/tc/tr/ml/mc/mr/bl/bc/br）+ custom 百分比坐标 + auto（保持游戏原位置）；
+///    ★ v1.0.5 起**不再区分横竖版**（玩家反馈竖版那套设置无效，已整条删除）。
 /// 4. **战斗设置页**：Mod 按钮列（`ModCol4`）注入「手套·按钮位置」→ 打开**本 Mod 独占**浮层面板，
-///    面板里两行「横版 · 位置」「竖版 · 位置」（共享组件 `PosEditorRow.PanelSpec`）。
+///    面板里只有一行「位置」（共享组件 `PosEditorRow.PanelSpec`）。
 /// 5. **收款码**：每帧 `SponsorQrInjector.Tick(tree, "手套", root, "Resources/SponsorQR.png")`。
 ///
 /// ── ★ v1.0.1 新增（task-6 / 用户）─────────────────────────────────
@@ -77,9 +77,6 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 	private const string KLandMode = "landMode";
 	private const string KLandX = "landX";
 	private const string KLandY = "landY";
-	private const string KPortMode = "portMode";
-	private const string KPortX = "portX";
-	private const string KPortY = "portY";
 	private const string KEnableLog = "enableLog";
 	/// <summary>★ v1.0.1：铲子悬停植物时的整株白色遮罩开关。</summary>
 	private const string KShovelWhiteMask = "shovelWhiteMask";
@@ -113,7 +110,7 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 	private static readonly PosEditorRow.PanelSpec PosSpec =
 		new PosEditorRow.PanelSpec("glove", "手套按钮 · 位置", "手套·按钮位置");
 
-	/// <summary>位置预设值（与 mod.json 里 landMode/portMode 的 options **逐字一致**）。</summary>
+	/// <summary>位置预设值（与 mod.json 里 landMode 的 options **逐字一致**）。</summary>
 	private static readonly string[] PosPresetValues =
 	{
 		"auto", "tl", "tc", "tr", "ml", "mc", "mr", "bl", "bc", "br", "custom"
@@ -162,9 +159,6 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 	private string _landMode = "auto";
 	private int _landX = 84;
 	private int _landY = 2;
-	private string _portMode = "auto";
-	private int _portX = 84;
-	private int _portY = 2;
 	/// <summary>★ v1.0.1：铲子悬停植物时的整株白色遮罩（默认开）。</summary>
 	private bool _shovelWhiteMask = true;
 
@@ -256,8 +250,7 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 			_context = context;
 			ReloadSettings();
 			Info("初始化完成；PackageRoot=" + ((context == null) ? "<null>" : context.PackageRoot)
-				+ "；enabled=" + _enabled + "，横版=" + _landMode + "(" + _landX + "," + _landY + ")"
-				+ "，竖版=" + _portMode + "(" + _portX + "," + _portY + ")。");
+				+ "；enabled=" + _enabled + "，位置=" + _landMode + "(" + _landX + "," + _landY + ")。");
 		}
 		catch (Exception ex)
 		{
@@ -291,7 +284,7 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 			// ★ 不受 enableLog 门控：每次启动只打 1 行，用来确认"包真的加载且入口跑起来了"。
 			try
 			{
-				GD.Print(LogPrefix + "v1.0.4 ready（手套；enableLog=" + (_log ? "on" : "off") + "）");
+				GD.Print(LogPrefix + "v1.0.5 ready（手套；enableLog=" + (_log ? "on" : "off") + "）");
 			}
 			catch { }
 			Info("已挂载 process_frame（每 " + ScanStride + " 帧轮询一次「启用手套 / 设置页按钮」。");
@@ -355,9 +348,6 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 			_landMode = NormalizeMode(ReadString(KLandMode, "auto"));
 			_landX = ReadInt(KLandX, 84, 0, 100);
 			_landY = ReadInt(KLandY, 2, 0, 100);
-			_portMode = NormalizeMode(ReadString(KPortMode, "auto"));
-			_portX = ReadInt(KPortX, 84, 0, 100);
-			_portY = ReadInt(KPortY, 2, 0, 100);
 			_shovelWhiteMask = ReadBool(KShovelWhiteMask, true);
 			_log = ReadBool(KEnableLog, false);
 		}
@@ -783,10 +773,11 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 		if (nativeParent != null && !GodotObject.IsInstanceValid(nativeParent)) { nativeParent = null; }
 		if (nativeParent == _overlay) { nativeParent = null; }
 
-		bool portrait = IsPortrait(ctrl);
-		string mode = NormalizeMode(portrait ? _portMode : _landMode);
-		int px = Mathf.Clamp(portrait ? _portX : _landX, 0, 100);
-		int py = Mathf.Clamp(portrait ? _portY : _landY, 0, 100);
+		// ★ v1.0.5：只有一套位置设置（landMode/landX/landY），横屏竖屏都用它 ——
+		//   不再按"视口宽>高"在横/竖两套之间二选一（玩家反馈竖版那套设置无效）。
+		string mode = NormalizeMode(_landMode);
+		int px = Mathf.Clamp(_landX, 0, 100);
+		int py = Mathf.Clamp(_landY, 0, 100);
 
 		if (string.Equals(mode, "auto", StringComparison.Ordinal))
 		{
@@ -886,27 +877,6 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 			case "br": fx = 100f; fy = 100f; break;
 			default: break;   // custom / 未知值：用滑块坐标
 		}
-	}
-
-	/// <summary>横竖版判定：视口宽 &gt; 高 = 横版；高 &gt;= 宽 = 竖版（与需求逐字一致）。</summary>
-	private bool IsPortrait(Node anyNode)
-	{
-		try
-		{
-			Viewport vp = null;
-			if (anyNode != null && GodotObject.IsInstanceValid(anyNode)) { vp = anyNode.GetViewport(); }
-			if (vp == null && _tree != null && GodotObject.IsInstanceValid(_tree) && _tree.Root != null)
-			{
-				vp = _tree.Root.GetViewport();
-			}
-			if (vp != null)
-			{
-				Vector2 s = vp.GetVisibleRect().Size;
-				if (s.X > 0f && s.Y > 0f) { return s.Y >= s.X; }
-			}
-		}
-		catch { }
-		return false;
 	}
 
 	/// <summary>
@@ -2291,7 +2261,10 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 		catch { return false; }
 	}
 
-	/// <summary>两行「横版 · 位置」「竖版 · 位置」（共享组件 PosEditorRow，改动即时生效 + 写配置）。</summary>
+	/// <summary>
+	/// 面板里**只有一行**「位置」（共享组件 PosEditorRow，改动即时生效 + 写配置）。
+	/// ★ v1.0.5：删掉原来的「竖版 · 位置」那一行（玩家反馈竖版设置无效），定位统一用 landMode/landX/landY。
+	/// </summary>
 	private void EnsurePosEditor(Node optionRoot)
 	{
 		try
@@ -2315,14 +2288,10 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 			}
 			catch { }
 
-			// ★ 同一个面板里两行即可（按钮文字与面板标题都带「手套」前缀，面板由本 Mod 独占）。
-			PosEditorRow.Ensure(optionRoot, PosSpec, "glove_land", "横版 · 位置",
+			// ★ 只保留一行（按钮文字与面板标题都带「手套」前缀，面板由本 Mod 独占）。
+			PosEditorRow.Ensure(optionRoot, PosSpec, "glove_land", "位置",
 				PosPresetValues, PosPresetLabels, PosCustomValue,
 				NormalizeMode(_landMode), _landX, _landY, bw, bh, ApplyLandFromEditor);
-
-			PosEditorRow.Ensure(optionRoot, PosSpec, "glove_port", "竖版 · 位置",
-				PosPresetValues, PosPresetLabels, PosCustomValue,
-				NormalizeMode(_portMode), _portX, _portY, bw, bh, ApplyPortFromEditor);
 		}
 		catch (Exception ex)
 		{
@@ -2330,7 +2299,7 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 		}
 	}
 
-	/// <summary>横版那一行改动 ⇒ 写配置 + 当帧生效（下一帧 MaintainGlove 就会用新值定位）。</summary>
+	/// <summary>「位置」那一行改动 ⇒ 写配置 + 当帧生效（下一帧 MaintainGlove 就会用新值定位）。</summary>
 	private void ApplyLandFromEditor(string preset, int x, int y)
 	{
 		try
@@ -2343,25 +2312,7 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 			changes[KLandX] = _landX;
 			changes[KLandY] = _landY;
 			SaveSettings(changes);
-			Info("横版位置 → " + _landMode + "(" + _landX + "%," + _landY + "%)。");
-		}
-		catch { }
-	}
-
-	/// <summary>竖版那一行改动 ⇒ 写配置 + 当帧生效。</summary>
-	private void ApplyPortFromEditor(string preset, int x, int y)
-	{
-		try
-		{
-			_portMode = NormalizeMode(preset);
-			_portX = Mathf.Clamp(x, 0, 100);
-			_portY = Mathf.Clamp(y, 0, 100);
-			Dictionary<string, object> changes = new Dictionary<string, object>(3);
-			changes[KPortMode] = _portMode;
-			changes[KPortX] = _portX;
-			changes[KPortY] = _portY;
-			SaveSettings(changes);
-			Info("竖版位置 → " + _portMode + "(" + _portX + "%," + _portY + "%)。");
+			Info("按钮位置 → " + _landMode + "(" + _landX + "%," + _landY + "%)。");
 		}
 		catch { }
 	}
