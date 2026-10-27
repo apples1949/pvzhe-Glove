@@ -1,0 +1,254 @@
+{
+  "schemaVersion": 2,
+  "id": "glove",
+  "name": "手套",
+  "version": "1.0.4",
+  "author": "apples1949",
+  "description": "在除「我是僵尸 / 我是僵尸大冒险」以外的关卡里自动启用游戏自带的搬运手套：点手套即可把场上植物拿起来换位置（原版只在调试开关下才有），并解决了「能同时选中铲子和手套」的问题（两者互斥，任何时刻只有一个生效）。拖动时跟随鼠标的预览用的是植物本身的外观（毁灭加农炮这类变体不会再显示成基础形态），并且手套放下植物不会误触发它自己的点击（加农炮 / 泡椒罐子不再自动开火）。可在「选项 → Mod 管理 → 手套 → 配置」里开关，分别设置横版 / 竖版下按钮的位置（九宫格锚点或自定义百分比坐标），并开关「铲子悬停白色遮罩」（用铲子选中植物时整株变白）。",
+  "playInstructions": "1. 进任意普通关卡（我是僵尸 / 我是僵尸大冒险 不会启用，保持原样）。\n2. 战斗界面顶部会出现「手套」按钮（和游戏自带的一样）：点一下进入搬运模式，再点植物把它拿起来，点目标格子放下。拿起植物后，**能放下的位置由「种植位置标识」Mod 负责提示**（装了它就自动跟着显示，未装则不显示）；原来那一格不能放回原处。拖动时跟随鼠标的预览就是这株植物本身的外观；放下后 0.25 秒内不会触发它自己的点击（加农炮、泡椒罐子之类不会自动开火）。\n3. 想换按钮位置：选项 → 战斗设置（设置植物僵尸血条那一页）→ 点右侧 Mod 按钮列的「手套·按钮位置」。\n4. 面板里有两行：「横版 · 位置」（屏幕宽 > 高时生效）和「竖版 · 位置」（高 >= 宽时生效）。每行先选预设（左上 / 中上 / … / 右下，或「自定义」），选「自定义」后再拖 X / Y 滑动条。改动即时生效并写入配置。点「关闭」或点面板外的空白处都能收起面板。\n5. 「自动（原位置）」= 完全不动，保持游戏原生位置。\n6. 用铲子选中某株植物时，整株会变成白色（提醒你铲的就是它）；不想要可在配置里关掉「铲子悬停白色遮罩」。\n7. 总开关：选项 → Mod 管理 → 手套 → 配置 → 「启用手套」（战斗中关掉会立即移除手套）。",
+  "dependencies": [],
+  "conflicts": [],
+  "provides": {},
+  "overrides": {},
+  "scripts": [],
+  "settings": [
+    {
+      "key": "enabled",
+      "type": "bool",
+      "label": "启用手套",
+      "group": "功能",
+      "description": "开（默认）= 除「我是僵尸 / 我是僵尸大冒险」以外的关卡自动获得搬运手套。关 = 完全不启用；若在战斗中关闭，会立即把本关卡的手套移除。",
+      "applyMode": "immediate",
+      "affectsGameplay": false,
+      "default": true
+    },
+    {
+      "key": "landMode",
+      "type": "enum",
+      "label": "横版 · 按钮位置",
+      "group": "外观",
+      "description": "**横版（屏幕宽 > 高）**时手套按钮的位置。auto = 完全不动（保持游戏原生位置）；九宫格 = 贴到屏幕对应角落；custom = 用下面的 X/Y 百分比。",
+      "applyMode": "immediate",
+      "affectsGameplay": false,
+      "default": "auto",
+      "options": [
+        {
+          "value": "auto",
+          "label": "自动（原位置）"
+        },
+        {
+          "value": "tl",
+          "label": "左上"
+        },
+        {
+          "value": "tc",
+          "label": "中上"
+        },
+        {
+          "value": "tr",
+          "label": "右上"
+        },
+        {
+          "value": "ml",
+          "label": "左中"
+        },
+        {
+          "value": "mc",
+          "label": "正中"
+        },
+        {
+          "value": "mr",
+          "label": "右中"
+        },
+        {
+          "value": "bl",
+          "label": "左下"
+        },
+        {
+          "value": "bc",
+          "label": "中下"
+        },
+        {
+          "value": "br",
+          "label": "右下"
+        },
+        {
+          "value": "custom",
+          "label": "自定义"
+        }
+      ]
+    },
+    {
+      "key": "landX",
+      "type": "int",
+      "label": "横版 · 自定义 X（%）",
+      "group": "外观",
+      "default": 84,
+      "min": 0,
+      "max": 100,
+      "step": 1,
+      "description": "按钮左边缘位置，按屏幕宽度的百分比（0 = 最左，100 = 最右）。只在「横版 · 按钮位置」= 自定义时生效。",
+      "applyMode": "immediate",
+      "affectsGameplay": false,
+      "visibleWhen": {
+        "key": "landMode",
+        "op": "eq",
+        "value": "custom"
+      }
+    },
+    {
+      "key": "landY",
+      "type": "int",
+      "label": "横版 · 自定义 Y（%）",
+      "group": "外观",
+      "default": 2,
+      "min": 0,
+      "max": 100,
+      "step": 1,
+      "description": "按钮上边缘位置，按屏幕高度的百分比（0 = 最上，100 = 最下）。只在「横版 · 按钮位置」= 自定义时生效。",
+      "applyMode": "immediate",
+      "affectsGameplay": false,
+      "visibleWhen": {
+        "key": "landMode",
+        "op": "eq",
+        "value": "custom"
+      }
+    },
+    {
+      "key": "portMode",
+      "type": "enum",
+      "label": "竖版 · 按钮位置",
+      "group": "外观",
+      "description": "**竖版（屏幕高 >= 宽）**时手套按钮的位置。auto = 完全不动（保持游戏原生位置）；九宫格 = 贴到屏幕对应角落；custom = 用下面的 X/Y 百分比。",
+      "applyMode": "immediate",
+      "affectsGameplay": false,
+      "default": "auto",
+      "options": [
+        {
+          "value": "auto",
+          "label": "自动（原位置）"
+        },
+        {
+          "value": "tl",
+          "label": "左上"
+        },
+        {
+          "value": "tc",
+          "label": "中上"
+        },
+        {
+          "value": "tr",
+          "label": "右上"
+        },
+        {
+          "value": "ml",
+          "label": "左中"
+        },
+        {
+          "value": "mc",
+          "label": "正中"
+        },
+        {
+          "value": "mr",
+          "label": "右中"
+        },
+        {
+          "value": "bl",
+          "label": "左下"
+        },
+        {
+          "value": "bc",
+          "label": "中下"
+        },
+        {
+          "value": "br",
+          "label": "右下"
+        },
+        {
+          "value": "custom",
+          "label": "自定义"
+        }
+      ]
+    },
+    {
+      "key": "portX",
+      "type": "int",
+      "label": "竖版 · 自定义 X（%）",
+      "group": "外观",
+      "default": 84,
+      "min": 0,
+      "max": 100,
+      "step": 1,
+      "description": "按钮左边缘位置，按屏幕宽度的百分比（0 = 最左，100 = 最右）。只在「竖版 · 按钮位置」= 自定义时生效。",
+      "applyMode": "immediate",
+      "affectsGameplay": false,
+      "visibleWhen": {
+        "key": "portMode",
+        "op": "eq",
+        "value": "custom"
+      }
+    },
+    {
+      "key": "portY",
+      "type": "int",
+      "label": "竖版 · 自定义 Y（%）",
+      "group": "外观",
+      "default": 2,
+      "min": 0,
+      "max": 100,
+      "step": 1,
+      "description": "按钮上边缘位置，按屏幕高度的百分比（0 = 最上，100 = 最下）。只在「竖版 · 按钮位置」= 自定义时生效。",
+      "applyMode": "immediate",
+      "affectsGameplay": false,
+      "visibleWhen": {
+        "key": "portMode",
+        "op": "eq",
+        "value": "custom"
+      }
+    },
+    {
+      "key": "shovelWhiteMask",
+      "type": "bool",
+      "label": "铲子悬停白色遮罩",
+      "group": "功能",
+      "description": "开（默认）= 用铲子选中某株植物时，整株植物显示纯白遮罩（提醒你即将铲掉的就是它）。关 = 完全不干预，植物保持原色。",
+      "applyMode": "immediate",
+      "affectsGameplay": false,
+      "default": true
+    },
+    {
+      "key": "enableLog",
+      "type": "bool",
+      "label": "输出诊断日志",
+      "group": "诊断",
+      "description": "排查问题时打开，会把运行状态写进 godot.log。平时关掉，不刷日志。",
+      "applyMode": "immediate",
+      "affectsGameplay": false,
+      "default": false
+    },
+    {
+      "key": "aboutChangelog",
+      "type": "text",
+      "label": "更新内容",
+      "group": "关于",
+      "content": "v1.0.4 · 2026-10-27\n修复：泡椒罐子 / 加农炮等点击类植物被手套搬动后仍会被触发（罐子被砸、加农炮开火）。根因是\"拿起\"那一次点击与手套拾取是同一批输入，等到拿到被搬植物再屏蔽已经晚了一拍；现在改为**手套模式开着期间，全场植物的点击一律被临时屏蔽**（模式关闭/换关/卸载时全部还原），新种下的植物每 0.5 秒补一次；另外拿起那一刻还会撤销植物身上可能已被触发的按键状态（pressed / pressAwait）。\n\nv1.0.3 · 2026-10-27\n修复：用点击类植物（玉米加农炮 / 毁灭加农炮 / 泡椒罐子等）被手套放下后，会立刻被同一次点击触发（开火、引爆）。现在搬运期间就临时屏蔽这一株的点击响应，放下后再保持 0.25 秒且确认键松开才还原；只影响被搬的那一株。\n修复：拖动植物时跟随鼠标的预览不再按名字重造默认外观 —— 改用被搬植物自己的 sprite 克隆，毁灭加农炮等变体显示的就是它本体的外观。\n\nv1.0.2 · 2026-10-27\n拆除：删掉本模组自绘的「可放置位置」格子（绿色半透明方块 + 琥珀源格框那一套，样式与「种植位置标识」不一致）。现在本模组不再画任何格子，可放置位置的提示交给「种植位置标识」Mod。\n新增：铲子与手套互斥 —— 选中手套会自动取消铲子，选中铲子会自动取消手套（宿主本身不处理工具之间的互斥，所以以前能同时选中）；任何时刻只可能有一个处于选中状态。\n\nv1.0.1 · 2026-10-27\n新增：手套搬运植物时高亮「可放置位置」—— 拿起植物后，所有能放下的格子亮绿色（呼吸效果），原来那一格用琥珀色框标出（不能放回原处）；判据直接用游戏自己的放置规则，取消/放下后立刻清除。\n新增：用铲子选中植物时，整株植物显示纯白遮罩（走宿主 shader 的 whiteStrength 通道，每帧维持，离开即还原）。\n新增：配置项「铲子悬停白色遮罩」（默认开），关掉后完全不干预且保证不残留白色。\n修复：位置面板的「关闭」现在更可靠 —— 标题栏「关闭」不再依赖战斗设置页是否还在，点面板外的空白处也能收起（共享组件 PosEditorRow 更新后重建生效）。\n\nv1.0.0 · 2026-10-27\n新增：在非「我是僵尸 / 我是僵尸大冒险」的关卡里自动启用手套（游戏自带的搬植物手套，原版只在调试开关下开启）。\n新增：配置项「启用手套」总开关；关闭时若在战斗中会立即移除本关卡的手套。\n新增：横版 / 竖版两套按钮位置设置（自动原位置 / 九宫格锚点 / 自定义百分比 X·Y），改完即时生效。\n新增：战斗设置页 Mod 按钮列里的「手套·按钮位置」按钮 —— 打开本模组独立面板，里面两行「横版 · 位置」「竖版 · 位置」，边调边看。"
+    },
+    {
+      "key": "aboutAuthor",
+      "type": "richtext",
+      "label": "作者与链接",
+      "group": "关于",
+      "content": "手套 v1.0.4 · 作者：apples1949\n\n[url=https://space.bilibili.com/186773722]B 站空间[/url]\n[url=https://apples1949.lanzouc.com/b007uuknqd]蓝奏云下载（密码 762b）[/url]\n\n本模组为玩家自制 Mod，与《植物大战僵尸杂交重制版》官方无隶属关系。\n赞助：微信扫码支持作者（见下方收款码图片）。"
+    }
+  ],
+  "runtimeAssembly": "Runtime/ModAssembly.dll",
+  "runtimeEntryType": "GloveEntry",
+  "runtimeApiVersion": 3,
+  "runtimeAssemblyPolicy": "optional",
+  "blueprints": [],
+  "translations": [],
+  "resources": [
+    "Resources/SponsorQR.png",
+    "Runtime/ModAssembly.dll"
+  ]
+}
