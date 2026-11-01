@@ -32,6 +32,15 @@ using PVZHE.ModEditor.ModSystem;
 ///    `PacketPickControl.ProcessTools`（:1221-1251）只处理"选卡 vs 工具"，不管工具之间互斥
 ///    ⇒ 这里每帧做**上升沿互斥**：手套刚选中就取消铲子、铲子刚选中就取消手套（详见 `TickToolMutex`）。
 ///
+/// ── ★ v1.0.6 新增（玩家需求「连花盆/莲叶一起搬」）─────────────────────
+/// 9. **连底座移动**（玩家：「要移动的植物无法种植在移动目的地，如果该植物带符合目的情况的
+///    花盆/莲叶/花盆莲叶，是否连同底座一起移动过去？」）：配置项 `moveWithBase`（默认开）+ 面板一行
+///    开关。宿主 `ProcessGlovePlace`（`TowerDefenseBattleFeatureGlove.cs:195-218`）只有
+///    `cell.CanPacketPlant(packet)` 为真才放 ⇒ 这里在"宿主已经决定不放"之后**兜底**一次：
+///    把脚下底座搬过去 → 真实复核 `CanPacketPlant(植物)` → 通过才搬植物，不通过立刻回滚底座。
+///    判据全部复用宿主（底座/植物两层都用 `TowerDefenseCellInstance.CanPacketPlant`，
+///    "是不是底座"用 `XWModPlantPlacementService.IsSupport` ⇔ `physiqueTypeFlags & 6`）。
+///
 /// ── 解包源码依据（全部实查，unpack/）────────────────────────────────
 /// · 手套是战斗 Feature，注册名 `"Glove"`：`Registry/Battle/TowerDefenseBattleRegistry.cs:34`。
 /// · 正常关卡**默认没有手套**：游戏自己只在调试开关下加
@@ -80,6 +89,11 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 	private const string KEnableLog = "enableLog";
 	/// <summary>★ v1.0.1：铲子悬停植物时的整株白色遮罩开关。</summary>
 	private const string KShovelWhiteMask = "shovelWhiteMask";
+	/// <summary>
+	/// ★ v1.0.6：搬运时「连底座（花盆 / 莲叶 / 花盆莲叶）一起移动」开关。
+	/// 语义：植物本体按宿主口径放不到目的地、而它脚下带着底座 ⇒ 是否把底座一起搬过去。
+	/// </summary>
+	private const string KMoveWithBase = "moveWithBase";
 
 	/// <summary>手套 Feature 的注册名（`TowerDefenseBattleRegistry` 里的字符串）。</summary>
 	private const string GloveFeatureName = "Glove";
@@ -108,7 +122,9 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 
 	/// <summary>本 Mod 独占的「按钮位置」面板（**不要**复用时停/加速的 spec id）。</summary>
 	private static readonly PosEditorRow.PanelSpec PosSpec =
-		new PosEditorRow.PanelSpec("glove", "手套按钮 · 位置", "手套·按钮位置");
+		// ★ v1.0.6：面板里现在是**两行**（位置 + 搬运·底座）⇒ 标题/入口文字不再写死「按钮位置」。
+		//   节点名仍由 PanelSpec.Id="glove" 决定（幂等键），改文字不影响复用。
+		new PosEditorRow.PanelSpec("glove", "手套 · 设置", "手套·设置");
 
 	/// <summary>位置预设值（与 mod.json 里 landMode 的 options **逐字一致**）。</summary>
 	private static readonly string[] PosPresetValues =
@@ -162,6 +178,9 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 	/// <summary>★ v1.0.1：铲子悬停植物时的整株白色遮罩（默认开）。</summary>
 	private bool _shovelWhiteMask = true;
 
+	/// <summary>★ v1.0.6：连同底座（花盆 / 莲叶 / 花盆莲叶）一起移动（默认开）。</summary>
+	private bool _moveWithBase = true;
+
 	// ── v1.0.2：铲子 / 手套 互斥（宿主 `PacketPickControl.ProcessTools`（:1221-1251）只处理
 	//    "选卡 vs 工具"，**不处理工具之间互斥** ⇒ 两个工具能同时处于 picking 状态，
 	//    玩家实测"又能选铲子又能选手套"。这里做**上升沿互斥**：谁刚被选中，就立刻取消另一方。
@@ -183,6 +202,22 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 	private bool _clickGuardErrLogged;
 	/// <summary>真实外观预览异常只报一次。</summary>
 	private bool _previewErrLogged;
+
+	// ── v1.0.6：连底座移动（花盆 / 莲叶 / 花盆莲叶）──
+	/// <summary>连底座放置异常只报一次。</summary>
+	private bool _basePlaceErrLogged;
+	/// <summary>下一次允许尝试"连底座移动"的时刻（毫秒）—— 防同一次点击被处理两遍。</summary>
+	private ulong _baseAttemptMsec;
+	/// <summary>"联机模式不接管"的提示只报一次（每次换关重置）。</summary>
+	private bool _baseMpWarned;
+	/// <summary>
+	/// 宿主 `XWModPlantPlacementService.IsSupport(TowerDefenseCharacterConfig)` 的反射句柄。
+	/// 该类在 unpack 里是 `internal static` ⇒ 只能反射；取不到时用**逐字等价**的
+	/// `(config.physiqueTypeFlags & 6) != 0` 兜底（见 `IsSupportConfig`）。
+	/// </summary>
+	private static System.Reflection.MethodInfo _isSupportMethod;
+	private static bool _isSupportResolved;
+	private static bool _isSupportFallbackWarned;
 
 	// ── v1.0.4：手套模式期间的"全场植物点击抑制"（v1.0.3 的"只屏蔽被搬那一株"必然晚一拍）──
 	/// <summary>一条屏蔽记录：组件 + 原本是否活着 + 最早可还原时刻。</summary>
@@ -284,7 +319,7 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 			// ★ 不受 enableLog 门控：每次启动只打 1 行，用来确认"包真的加载且入口跑起来了"。
 			try
 			{
-				GD.Print(LogPrefix + "v1.0.5 ready（手套；enableLog=" + (_log ? "on" : "off") + "）");
+				GD.Print(LogPrefix + "v1.0.6 ready（手套；enableLog=" + (_log ? "on" : "off") + "）");
 			}
 			catch { }
 			Info("已挂载 process_frame（每 " + ScanStride + " 帧轮询一次「启用手套 / 设置页按钮」。");
@@ -349,6 +384,7 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 			_landX = ReadInt(KLandX, 84, 0, 100);
 			_landY = ReadInt(KLandY, 2, 0, 100);
 			_shovelWhiteMask = ReadBool(KShovelWhiteMask, true);
+			_moveWithBase = ReadBool(KMoveWithBase, true);
 			_log = ReadBool(KEnableLog, false);
 		}
 		catch { }
@@ -363,6 +399,7 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 			if (_enabled) { _removeTried = false; }
 			// v1.0.1：配置改动时打一行（便于实机确认新开关真的被读到；受 enableLog 门控）
 			Info("配置已刷新：铲子悬停白色遮罩=" + (_shovelWhiteMask ? "开" : "关")
+				+ "，连底座移动=" + (_moveWithBase ? "开" : "关")
 				+ "，启用手套=" + (_enabled ? "开" : "关"));
 		}
 		catch { }
@@ -434,9 +471,23 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 			if (_context?.Settings == null || changes == null || changes.Count == 0) { return; }
 			if (!_context.Settings.TrySave(changes, out XWModSettingsSaveResult result))
 			{
-				SafeWarn("配置保存失败：" + ((result == null) ? "(无返回信息)" : result.Message));
+				SafeWarn("配置保存失败：" + ((result == null) ? "(无返回信息)" : result.Message)
+					+ "；本次改动只在当前会话内生效，重启后会回到上一次成功保存的值。");
 				return;
 			}
+			// ★ v1.0.6：成功也打一条**不受 enableLog 门控**的日志 —— 玩家反馈"改了设置重启就没了"时，
+			//   先看 godot.log 里有没有这一行，就能分清"没落盘"还是"落盘了但读取/应用有问题"。
+			try
+			{
+				System.Text.StringBuilder sb = new System.Text.StringBuilder();
+				foreach (KeyValuePair<string, object> kv in changes)
+				{
+					if (sb.Length > 0) { sb.Append(", "); }
+					sb.Append(kv.Key).Append('=').Append(kv.Value == null ? "<null>" : kv.Value.ToString());
+				}
+				GD.Print(LogPrefix + "配置已落盘：" + sb.ToString());
+			}
+			catch { }
 			if (result != null && result.RestartRequired)
 			{
 				Info("配置已保存（宿主提示需重启生效）。");
@@ -532,6 +583,19 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 			{
 				_previewErrLogged = true;
 				SafeWarn("真实外观预览异常（本条只报一次）：" + ex.Message);
+			}
+		}
+
+		// ★ v1.0.6：⑤ 目的地种不下时，按开关决定是否"连底座（花盆/莲叶/花盆莲叶）一起搬"。
+		//   放在最后：宿主是先处理输入（`ProcessTools → ProcessGlovePlace`）再跑本帧的，
+		//   所以这里看到的一定是"宿主已经决定不放"之后的状态（详见 TickMoveWithBase 注释）。
+		try { TickMoveWithBase(); }
+		catch (Exception ex)
+		{
+			if (!_basePlaceErrLogged)
+			{
+				_basePlaceErrLogged = true;
+				SafeWarn("连底座移动异常（本条只报一次）：" + ex.Message);
 			}
 		}
 
@@ -631,6 +695,7 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 		_repairSpriteNext = false;
 		_addedByUs = false;
 		_nativeParent = null;
+		_baseMpWarned = false;
 		ResetMutexEdges();
 		// v1.0.4：换关/退出时把"点击屏蔽"与"预览克隆"一起复位（避免上一关的引用串到下一关）
 		try { RestoreAllSuppressedForce("换关/离开战斗"); } catch { }
@@ -2209,6 +2274,490 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 		_previewClone = null;
 	}
 
+	// ================================================================ 连底座移动（v1.0.6）
+
+	/// <summary>
+	/// ★ v1.0.6（玩家需求）：「如果要移动的植物无法种植在移动目的地，而移动的这株植物带
+	/// 符合目的情况的花盆 / 莲叶 / 花盆莲叶（两栖：同时拥有花盆与莲叶功能），是否连同底座一起移动过去？」
+	///
+	/// ── 为什么是"兜底"而不是"接管" ─────────────────────────────────
+	/// 宿主 `ProcessGlovePlace`（`TowerDefenseBattleFeatureGlove.cs:195-218`）只有
+	/// `cell.CanPacketPlant(pickedCharacter.packet) == true` 才会 `PlaceCharacter`；
+	/// 为 false 时**什么都不做**（连拒绝音效都没有）。"带上底座能不能放"这个判断宿主里根本不存在
+	/// ⇒ 本方法只在"宿主已经决定不放"之后补一次尝试，原有手感零改动：
+	///   `CanPacketPlant == true` ⇒ 第一行就 return（仍由宿主自己放，它那套 tween / 音效 / 联机同步都不动）。
+	///
+	/// ── 判据全部用宿主自己的口径（不自己发明规则）──────────────────
+	/// ① 「底座符不符合目的地」：`targetCell.CanPacketPlant(底座.packet)` —— 宿主自己的种植判据；
+	/// ② 「植物本体能否种在(已搬好底座的)目的地」：`targetCell.CanPacketPlant(植物.packet)`，同上；
+	/// ③ 「这株植物脚下是不是真的带底座」：宿主 `XWModPlantPlacementService.IsSupport(config)`
+	///    ⇔ `(config.physiqueTypeFlags & 6) != 0`（花盆 / 莲叶 / 花盆莲叶两栖都命中）；
+	///    该方法在 unpack 里是 `internal static` ⇒ 反射调用，取不到则用逐字等价的位运算兜底；
+	///    "谁托着这株"优先用宿主公开 API `TowerDefenseCellInstance.GetSlot(character)`。
+	///
+	/// ⚠️ 为什么不预先"猜"目的地缺什么（踩坑记录）：
+	///   `CanPacketPlant` 里"花盆/莲叶让植物可种"的真正出口是 **`:1040 GetCharacterWhoHasGridType(packetConfig)`**
+	///   —— 只要格子里有一个"没被别人托着、`plantGridOverrideType` 命中该植物 `plantGridType`"的角色
+	///   （花盆 override=POT、莲叶 override=LILYPAD，而普通植物默认 `plantGridType = {GROUND,POT,LILYPAD}`），
+	///   就算能种。**和 `surroundRequireGroundOrPot`（:767 那段门）无关** —— 那个字段默认就是 false。
+	///   所以"先自己算一遍缺不缺底座"会漏掉最常见的屋顶/砖地(无 GROUND、有 BRICK)场景
+	///   ⇒ 这里改成**直接试搬 + 用宿主 CanPacketPlant 复核 + 失败回滚**，一步不猜。
+	///
+	/// ── 原子性（绝不能出现"底座搬走了、植物还在原地"）───────────────
+	/// 顺序：搬底座 → **真实** `CanPacketPlant(植物)` 复核 → 通过才搬植物；不通过/抛异常立刻把底座搬回原格。
+	/// 搬与回滚都走宿主同一个 API `TowerDefenseCellInstance.MoveCharacterToCell`（
+	/// 先 `EmitDestroy()` 让原格把它摘掉，与 `PlaceCharacter`（:229-255）逐字一致）。
+	///
+	/// ── 其它 ──────────────────────────────────────────────────────
+	/// · 只在"确认点击"那一帧动手（`mapControl.IsConfirmInput()`，与宿主同一判据）；
+	/// · 联机模式**完全不接管**（宿主对底座没有搬家同步协议，硬搬会不同步）⇒ 保持原逻辑；
+	/// · 开关关闭 ⇒ 第一行 return，行为与 v1.0.5 完全一致。
+	/// </summary>
+	private void TickMoveWithBase()
+	{
+		if (!_moveWithBase) { return; }
+
+		// ★ v1.0.6 实机复核补的护栏：**暂停态一律不接管**。
+		//   为什么：本 Mod 的每帧钩子挂的是 `SceneTree.process_frame`（暂停时照常发），
+		//   而宿主 `TowerDefenseBattleFeatureMap.Process` 在暂停时不再跑
+		//   （`BattleOption` 继承 `DialogBoxBase`，`_Ready` 里 `GetTree().Paused = true`），
+		//   `TowerDefenseControl.OptionButtonPressed()` 也**不会**清手套的 pickedCharacter。
+		//   ⇒ 玩家"手里正拿着植物 → 打开战斗设置页 → 在面板上随便点一下"时，
+		//   `mapControl.IsConfirmInput()` 仍为 true（引擎级 Input 动作不受 UI 消费影响），
+		//   就会在暂停中的战场上把植物 + 底座搬走。这一行彻底堵掉这条路径。
+		//   联机模式下 `BattleOption._Ready` 会把 pause 关掉 ⇒ 不会挡正常用法。
+		bool paused = false;
+		try { paused = _tree != null && GodotObject.IsInstanceValid(_tree) && _tree.Paused; } catch { }
+		if (paused) { return; }
+
+		TowerDefenseBattleFeatureGlove feature = null;
+		TowerDefenseCharacter picked = null;
+		if (!TryGetGloveCarry(out feature, out picked)) { return; }
+		if (!(picked is TowerDefensePlant)) { return; }
+
+		TowerDefensePacketConfig packet = null;
+		try { packet = picked.packet; } catch { }
+		if (packet == null || !GodotObject.IsInstanceValid(packet)) { return; }
+
+		TowerDefenseBattleFeatureMap mapFeature = null;
+		TowerDefenseMapControl mapControl = null;
+		try { mapFeature = TowerDefenseManager.GetMapFeature(); } catch { }
+		if (mapFeature == null || !GodotObject.IsInstanceValid(mapFeature)) { return; }
+		try { mapControl = mapFeature.mapControl; } catch { }
+		if (mapControl == null || !GodotObject.IsInstanceValid(mapControl)) { return; }
+
+		// 只在"确认"那一帧动手 —— 与宿主 `ProcessGlovePlace` 同一判据
+		// （PC = `Input.IsActionJustPressed("Press")`，手机 = `IsActionJustReleased`）。
+		bool confirm = false;
+		try { confirm = mapControl.IsConfirmInput(); } catch { }
+		if (!confirm) { return; }
+
+		Vector2 world = Vector2.Zero;
+		try { world = mapControl.GetGlobalMousePosition(); } catch { return; }
+		TowerDefenseManager mgr = TowerDefenseManager.Instance;
+		if (mgr == null || !GodotObject.IsInstanceValid(mgr)) { return; }
+
+		Vector2I gridPos = Vector2I.Zero;
+		try { gridPos = mgr.GetMapGridPosFromMouse(world); } catch { return; }
+		Vector2I sourceGridPos = Vector2I.Zero;
+		try { sourceGridPos = feature.sourceGridPos; } catch { }
+		if (gridPos == sourceGridPos) { return; }       // 原格不能放回（宿主同款限制）
+		bool inMap = false;
+		try { inMap = mgr.CheckMapGridPosIn(gridPos); } catch { }
+		if (!inMap) { return; }
+
+		TowerDefenseCellInstance target = null;
+		try { target = TowerDefenseManager.GetMapCell(gridPos); } catch { }
+		if (target == null || !GodotObject.IsInstanceValid(target)) { return; }
+
+		// ① 宿主口径先判一次：能放 ⇒ 一律交给宿主（零改动、零接管）
+		bool plantable = false;
+		try { plantable = target.CanPacketPlant(packet); } catch { }
+		if (plantable) { return; }
+
+		// 联机模式不接管（底座没有同步协议）
+		if (IsMultiplayerMode())
+		{
+			if (!_baseMpWarned)
+			{
+				_baseMpWarned = true;
+				Info("联机模式：不接管「连底座移动」，保持原逻辑（底座无同步协议）。");
+			}
+			return;
+		}
+
+		// ② 找出这株植物脚下的底座
+		TowerDefenseCellInstance source = null;
+		try { source = feature.sourceCell; } catch { }
+		if (source == null || !GodotObject.IsInstanceValid(source))
+		{
+			try { source = TowerDefenseManager.GetMapCell(sourceGridPos); } catch { }
+		}
+		if (source == null || !GodotObject.IsInstanceValid(source)) { return; }
+
+		List<TowerDefenseCharacter> bases = CollectSupports(source, picked);
+		if (bases.Count == 0)
+		{
+			Info("目的地种不下，且这株植物脚下没有花盆 / 莲叶 ⇒ 按原逻辑不放：" + SafeCharacterName(picked));
+			return;
+		}
+
+		// 同一帧/同一次点击只尝试一次（防抖；正常情况放下后 pickedCharacter 已清空，这里是双保险）
+		ulong now = Time.GetTicksMsec();
+		if (now < _baseAttemptMsec) { return; }
+		_baseAttemptMsec = now + 150UL;
+
+		for (int i = 0; i < bases.Count; i++)
+		{
+			TowerDefenseCharacter support = bases[i];
+			if (support == null || !GodotObject.IsInstanceValid(support)) { continue; }
+			TowerDefensePacketConfig supportPacket = null;
+			try { supportPacket = support.packet; } catch { }
+			if (supportPacket == null || !GodotObject.IsInstanceValid(supportPacket)) { continue; }
+
+			// 底座自己也必须能种在目的地（用的还是宿主 CanPacketPlant）
+			bool supportOk = false;
+			try { supportOk = target.CanPacketPlant(supportPacket); } catch { }
+			if (!supportOk)
+			{
+				Info("连底座移动：底座不符合目的地地形，跳过：" + SafeCharacterName(support));
+				continue;
+			}
+			if (TryPlaceWithSupport(feature, source, target, picked, support)) { return; }
+		}
+
+		Info("连底座移动未生效（底座不符合目的地 / 植物仍放不下）⇒ 按原逻辑不放：" + SafeCharacterName(picked));
+	}
+
+	/// <summary>
+	/// 搬底座 → 真实复核植物本体能否种 → 能就搬植物，不能就把底座搬回来。
+	/// 返回 true = "已经完成放置"（调用方立刻 return）；false = "什么都没变"。
+	/// </summary>
+	private bool TryPlaceWithSupport(TowerDefenseBattleFeatureGlove feature,
+		TowerDefenseCellInstance source, TowerDefenseCellInstance target,
+		TowerDefenseCharacter plant, TowerDefenseCharacter support)
+	{
+		bool supportMoved = false;
+		bool plantPlaced = false;
+
+		// 搬动前先记下宿主"谁托着谁"的映射里与被搬两者有关的条目 ——
+		// 宿主 `CharacterPlant` / `CharacterDestroy` 会改这张表，回滚时逐字还原（见 RestoreSlotLinks）。
+		System.Collections.Generic.Dictionary<TowerDefenseCharacter, TowerDefenseCharacter> srcMap = null;
+		bool hadSupportKey = false, hadPlantKey = false;
+		TowerDefenseCharacter supportVal = null, plantVal = null;
+		try
+		{
+			srcMap = source.characterSlotDictionary;
+			if (srcMap != null)
+			{
+				hadSupportKey = srcMap.ContainsKey(support);
+				if (hadSupportKey) { supportVal = srcMap[support]; }
+				hadPlantKey = srcMap.ContainsKey(plant);
+				if (hadPlantKey) { plantVal = srcMap[plant]; }
+			}
+		}
+		catch { srcMap = null; }
+		try
+		{
+			// ① 底座先就位（瞬间就位，不演 0.5s 动画）
+			MoveCharacterCell(support, source, target);
+			supportMoved = true;
+
+			// ② 真实复核：复用宿主判据，不自己模拟 CanPacketPlant
+			bool ok = false;
+			try
+			{
+				TowerDefensePacketConfig packet = plant.packet;
+				if (packet != null && GodotObject.IsInstanceValid(packet))
+				{
+					ok = target.CanPacketPlant(packet);
+				}
+			}
+			catch { ok = false; }
+			if (!ok)
+			{
+				Info("连底座移动：底座能种，但植物本体仍放不下 ⇒ 回滚底座：" + SafeCharacterName(support));
+				RollbackSupport(support, target, source, "植物本体仍放不下");
+				RestoreSlotLinks(srcMap, support, plant, hadSupportKey, supportVal, hadPlantKey, plantVal);
+				return false;
+			}
+
+			// ③ 植物本体 —— 与宿主 `PlaceCharacter` 同一套动作
+			plant.EmitDestroy();
+			source.MoveCharacterToCell(plant, target);
+			plantPlaced = true;
+
+			// ④ 收尾 —— 与宿主 `PlaceCharacter` + `FinishGlovePlacement` 一致
+			try { AudioManager.Instance?.AudioPlay("ShovelDig"); } catch { }
+			Info("连底座移动成功：" + SafeCharacterName(plant) + " + 底座 " + SafeCharacterName(support)
+				+ " → (" + target.gridPos.X + "," + target.gridPos.Y + ")");
+			try { feature.ClearPickedState(); } catch { }
+			try
+			{
+				TowerDefenseBattleFeatureMap mapFeature = TowerDefenseManager.GetMapFeature();
+				if (mapFeature != null && GodotObject.IsInstanceValid(mapFeature)
+					&& mapFeature.packetPickControl != null && GodotObject.IsInstanceValid(mapFeature.packetPickControl))
+				{
+					mapFeature.packetPickControl.Release();
+				}
+			}
+			catch { }
+			return true;
+		}
+		catch (Exception ex)
+		{
+			// supportMoved 只用于日志判别（回滚判据必须是"实际成员关系"，见下面的 !plantPlaced 分支）
+			SafeWarn("连底座移动异常（已吞）：" + ex.Message
+				+ "；底座" + (supportMoved ? "已搬出原格" : "未搬出原格") + "，按实际所在格回滚。");
+			if (!plantPlaced)
+			{
+				// ★ v1.0.6 加固（复核 P1）：**不能用 `supportMoved` 当回滚判据** ——
+				//   它只有在 `MoveCharacterCell` **整步成功返回后**才置位，而异常恰好可能发生在
+				//   `EmitDestroy()` 与 `MoveCharacterToCell()` 之间/内部：
+				//     ① `EmitDestroy()` 抛 ⇒ 底座可能已从原格摘掉、却没登记到目标格；
+				//     ② `MoveCharacterToCell()` 后半段抛 ⇒ 底座登记在目标格、但 gridPos 还是原格。
+				//   两种情况下 `supportMoved` 都是 false ⇒ 旧写法不回滚 ⇒ 底座"既不在原格也不在目标格"，
+				//   铲不到、不支撑上层植物、还会被存档带走（坏档级）。
+				//   ⇒ 改成按**实际成员关系**判断：还在原格就只修映射（不重复搬），不在才补搬回来。
+				EnsureSupportBackInSource(source, target, support, srcMap,
+					hadSupportKey, supportVal, hadPlantKey, plantVal, plant);
+			}
+			return false;
+		}
+	}
+
+	/// <summary>
+	/// 把某株角色从一个格子搬到另一个格子 —— 宿主 `MoveCharacterToCell` 的既定用法：
+	/// 先 `EmitDestroy()`（让原格的 `CharacterDestroy` 把它摘掉），再 `MoveCharacterToCell(...)`。
+	/// 与宿主 `PlaceCharacter`（`TowerDefenseBattleFeatureGlove.cs:247-248`）逐字一致。
+	/// </summary>
+	private static void MoveCharacterCell(TowerDefenseCharacter character,
+		TowerDefenseCellInstance fromCell, TowerDefenseCellInstance toCell)
+	{
+		character.EmitDestroy();
+		fromCell.MoveCharacterToCell(character, toCell, 0.01);
+	}
+
+	/// <summary>
+	/// ★ v1.0.6 加固（复核 P1）：异常后按**实际成员关系**把底座"补回原格"。
+	/// 三种异常态都能收：
+	///   ① 底座其实还在原格（`EmitDestroy` 抛、什么都没搬）⇒ 一个格子都不动，只还原"谁托着谁"映射；
+	///   ② 底座已从原格摘掉、还没登记到目标格 ⇒ `RollbackSupport` 的 `EmitDestroy`（对已摘除者基本 no-op）
+	///      + `target.MoveCharacterToCell(support, source)` 正好把它登记回原格；
+	///   ③ 已登记到目标格但 gridPos 还是原格（跨格不一致）⇒ 先由 `EmitDestroy` 从目标格摘掉再搬回。
+	/// ⚠️ 刻意**不**用调用方的 `supportMoved` 标志（它在整步成功后才置位，见 TryPlaceWithSupport 的 catch 注释）。
+	/// </summary>
+	private void EnsureSupportBackInSource(TowerDefenseCellInstance source, TowerDefenseCellInstance target,
+		TowerDefenseCharacter support,
+		System.Collections.Generic.Dictionary<TowerDefenseCharacter, TowerDefenseCharacter> srcMap,
+		bool hadSupportKey, TowerDefenseCharacter supportVal,
+		bool hadPlantKey, TowerDefenseCharacter plantVal,
+		TowerDefenseCharacter plant)
+	{
+		try
+		{
+			bool inSource = false;
+			try
+			{
+				List<TowerDefenseCharacter> list = source.characterList;
+				inSource = list != null && list.Contains(support);
+			}
+			catch { }
+			if (!inSource)
+			{
+				RollbackSupport(support, target, source, "异常后补回原格");
+			}
+			else
+			{
+				Info("连底座移动异常：底座仍在原格，只还原堆叠映射。");
+			}
+		}
+		catch { }
+		finally
+		{
+			RestoreSlotLinks(srcMap, support, plant, hadSupportKey, supportVal, hadPlantKey, plantVal);
+		}
+	}
+
+	/// <summary>回滚：把底座搬回原格（同样走宿主 API）。失败只 Warn。</summary>
+	private void RollbackSupport(TowerDefenseCharacter support,
+		TowerDefenseCellInstance fromCell, TowerDefenseCellInstance backCell, string why)
+	{
+		try
+		{
+			if (support == null || !GodotObject.IsInstanceValid(support)) { return; }
+			MoveCharacterCell(support, fromCell, backCell);
+			Info("连底座移动：底座已回滚到原格（" + why + "）：" + SafeCharacterName(support));
+		}
+		catch (Exception ex)
+		{
+			SafeWarn("连底座移动：底座回滚失败（已吞，" + why + "）：" + ex.Message);
+		}
+	}
+
+	/// <summary>
+	/// 回滚后把宿主"谁托着谁"的映射还原成搬动前的样子。
+	/// 为什么需要：宿主 `CharacterPlant`（:358 / :381-390）与 `CharacterDestroy`（:452-494）都会改
+	/// `characterSlotDictionary`，一次"搬过去再搬回来"之后未必能把关系复原
+	/// （例如"花盆 → 植物"这条只在 `CharacterPlant` 的 `GetCharacterWhoHasGridType` 分支里写入）。
+	/// 这里只是把**我们搬动前读到的原值写回去**，不新增任何宿主不认识的语义。
+	/// </summary>
+	private static void RestoreSlotLinks(
+		System.Collections.Generic.Dictionary<TowerDefenseCharacter, TowerDefenseCharacter> map,
+		TowerDefenseCharacter support, TowerDefenseCharacter plant,
+		bool hadSupportKey, TowerDefenseCharacter supportVal,
+		bool hadPlantKey, TowerDefenseCharacter plantVal)
+	{
+		try
+		{
+			if (map == null) { return; }
+			bool okSupport = support != null && GodotObject.IsInstanceValid(support);
+			bool okPlant = plant != null && GodotObject.IsInstanceValid(plant);
+			if (hadSupportKey)
+			{
+				if (okSupport) { map[support] = supportVal; }
+			}
+			else if (okSupport && map.ContainsKey(support))
+			{
+				map.Remove(support);
+			}
+			if (hadPlantKey)
+			{
+				if (okPlant) { map[plant] = plantVal; }
+			}
+			else if (okPlant && map.ContainsKey(plant))
+			{
+				map.Remove(plant);
+			}
+		}
+		catch { }
+	}
+
+	/// <summary>
+	/// 找"这株植物脚下的底座"（花盆 / 莲叶 / 花盆莲叶）。
+	/// 优先用宿主自己的"谁托着谁"映射 `TowerDefenseCellInstance.characterSlotDictionary`
+	/// （宿主里两个方向都写过：`CharacterPlant` 的 :358 与 :390），再用同格内所有支撑类角色兜底
+	/// —— 判据一律是宿主 `IsSupport`，绝不按名字猜。
+	/// </summary>
+	private static List<TowerDefenseCharacter> CollectSupports(TowerDefenseCellInstance source, TowerDefenseCharacter plant)
+	{
+		List<TowerDefenseCharacter> list = new List<TowerDefenseCharacter>(4);
+		// ① 宿主自己的公开 API：`GetSlot(character)` = "谁托着这株"（:1534-1565，内部就是
+		//    `characterSlotDictionary[character]` + 一次方向修正扫描）⇒ 最可靠，优先用。
+		try
+		{
+			TowerDefenseCharacter under = source.GetSlot(plant);
+			if (IsSupportCharacter(under)) { AddSupportUnique(list, under); }
+		}
+		catch { }
+		try
+		{
+			System.Collections.Generic.Dictionary<TowerDefenseCharacter, TowerDefenseCharacter> map = null;
+			try { map = source.characterSlotDictionary; } catch { }
+			if (map != null)
+			{
+				foreach (KeyValuePair<TowerDefenseCharacter, TowerDefenseCharacter> kv in map)
+				{
+					TowerDefenseCharacter a = kv.Key;
+					TowerDefenseCharacter b = kv.Value;
+					if (b == plant && IsSupportCharacter(a)) { AddSupportUnique(list, a); }
+					if (a == plant && IsSupportCharacter(b)) { AddSupportUnique(list, b); }
+				}
+			}
+		}
+		catch { }
+		try
+		{
+			List<TowerDefenseCharacter> all = null;
+			try { all = source.characterList; } catch { }
+			if (all != null)
+			{
+				for (int i = 0; i < all.Count; i++)
+				{
+					TowerDefenseCharacter c = all[i];
+					if (c == null || c == plant) { continue; }
+					if (IsSupportCharacter(c)) { AddSupportUnique(list, c); }
+				}
+			}
+		}
+		catch { }
+		return list;
+	}
+
+	private static void AddSupportUnique(List<TowerDefenseCharacter> list, TowerDefenseCharacter c)
+	{
+		if (list == null || c == null || !GodotObject.IsInstanceValid(c)) { return; }
+		for (int i = 0; i < list.Count; i++)
+		{
+			if (list[i] == c) { return; }
+		}
+		list.Add(c);
+	}
+
+	/// <summary>是不是"活着的支撑类角色"（花盆 / 莲叶 / 花盆莲叶，口径 = 宿主 `IsSupport`）。</summary>
+	private static bool IsSupportCharacter(TowerDefenseCharacter c)
+	{
+		try
+		{
+			if (c == null || !GodotObject.IsInstanceValid(c)) { return false; }
+			if (c.die || c.isDestroy) { return false; }
+			TowerDefensePacketConfig packet = c.packet;
+			if (packet == null || !GodotObject.IsInstanceValid(packet)) { return false; }
+			return IsSupportConfig(packet.characterConfig);
+		}
+		catch { return false; }
+	}
+
+	/// <summary>
+	/// 宿主判据 `XWModPlantPlacementService.IsSupport(TowerDefenseCharacterConfig)`
+	/// —— unpack/addons/ModEditor/ModSystem/XWModPlantPlacementService.cs:257-264：
+	/// `(config.physiqueTypeFlags &amp; 6) != 0` ⇒ 花盆 / 莲叶 / 花盆莲叶（两栖 = 同时带 bit2 与 bit4）。
+	/// 该类在宿主里是 `internal static`（类型 public、方法 internal）⇒ 反射调用；
+	/// 反射不到（宿主改版/裁剪）就用**逐字等价**的位运算兜底，保证功能不静默失效。
+	/// </summary>
+	private static bool IsSupportConfig(TowerDefenseCharacterConfig config)
+	{
+		if (config == null || !GodotObject.IsInstanceValid(config)) { return false; }
+		if (!_isSupportResolved)
+		{
+			_isSupportResolved = true;
+			try
+			{
+				System.Reflection.Assembly asm = typeof(TowerDefenseManager).Assembly;
+				Type t = asm.GetType("PVZHE.ModEditor.ModSystem.XWModPlantPlacementService", false);
+				if (t != null)
+				{
+					_isSupportMethod = t.GetMethod("IsSupport",
+						System.Reflection.BindingFlags.Static
+							| System.Reflection.BindingFlags.NonPublic
+							| System.Reflection.BindingFlags.Public,
+						null, new Type[] { typeof(TowerDefenseCharacterConfig) }, null);
+				}
+				if (_isSupportMethod == null && !_isSupportFallbackWarned)
+				{
+					_isSupportFallbackWarned = true;
+					try
+					{
+						GD.Print(LogPrefix + "未反射到 XWModPlantPlacementService.IsSupport，"
+							+ "改用等价位运算（physiqueTypeFlags & 6）。");
+					}
+					catch { }
+				}
+			}
+			catch { }
+		}
+		if (_isSupportMethod != null)
+		{
+			try
+			{
+				object r = _isSupportMethod.Invoke(null, new object[] { config });
+				if (r is bool b) { return b; }
+			}
+			catch { _isSupportMethod = null; }
+		}
+		try { return (config.physiqueTypeFlags & 6) != 0; } catch { return false; }
+	}
+
 	// ================================================================ 战斗设置页（PosEditorRow）
 
 	/// <summary>扫战斗设置页对话框（`tree.Paused` 时才有），幂等注入「手套·按钮位置」按钮 + 两行位置编辑器。</summary>
@@ -2262,8 +2811,9 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 	}
 
 	/// <summary>
-	/// 面板里**只有一行**「位置」（共享组件 PosEditorRow，改动即时生效 + 写配置）。
-	/// ★ v1.0.5：删掉原来的「竖版 · 位置」那一行（玩家反馈竖版设置无效），定位统一用 landMode/landX/landY。
+	/// 面板里一行「位置」+（v1.0.6）一行「搬运 · 底座」（共享组件 PosEditorRow，
+	/// 改动即时生效 + 写配置）。★ v1.0.5：删掉原来的「竖版 · 位置」那一行（玩家反馈竖版设置无效），
+	/// 定位统一用 landMode/landX/landY。
 	/// </summary>
 	private void EnsurePosEditor(Node optionRoot)
 	{
@@ -2292,6 +2842,11 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 			PosEditorRow.Ensure(optionRoot, PosSpec, "glove_land", "位置",
 				PosPresetValues, PosPresetLabels, PosCustomValue,
 				NormalizeMode(_landMode), _landX, _landY, bw, bh, ApplyLandFromEditor);
+
+			// ★ v1.0.6：同一个面板里再加一行「搬运 · 底座」（CheckBox 开关 moveWithBase）。
+			//   共享组件只用来把面板/行容器建好，这一行是我们自己往容器里追加的 ——
+			//   **不改共享组件一个字节**。
+			EnsureMoveWithBaseRow();
 		}
 		catch (Exception ex)
 		{
@@ -2313,6 +2868,118 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 			changes[KLandY] = _landY;
 			SaveSettings(changes);
 			Info("按钮位置 → " + _landMode + "(" + _landX + "%," + _landY + "%)。");
+		}
+		catch { }
+	}
+
+	// ================================================================ 「搬运 · 底座」面板行（v1.0.6）
+
+	/// <summary>
+	/// ★ v1.0.6：在**本 Mod 自己的面板**里追加一行「搬运 · 底座」—— 一个 CheckBox 直接开关
+	/// `moveWithBase`（改动即时写配置，下一帧 `TickMoveWithBase` 就用新值，不用重进关卡）。
+	///
+	/// ── 为什么这么写（共享组件一个字节都没改）─────────────────────
+	/// `PosEditorRow.Ensure(...)` 已经把面板与行容器（`PanelSpec.RowsName`）建好了，
+	/// 这里只是**往那个容器里再追加一行我们自己建的 Godot 原生控件**：
+	///   · `PanelSpec.LayerName` / `RowsName` 是共享组件公开的命名约定（`internal` 类，本程序集可见）；
+	///   · 面板挂在 `SceneTree.Root` 下、与战斗设置页生命周期解耦 ⇒ 按名字找一次就够；
+	///   · `SetPressedNoSignal` 回填 ⇒ 不会把"程序化回填"当成玩家操作（同共享组件踩过的坑）。
+	/// </summary>
+	private void EnsureMoveWithBaseRow()
+	{
+		try
+		{
+			VBoxContainer rows = FindPosRowsContainer();
+			if (rows == null || !GodotObject.IsInstanceValid(rows)) { return; }
+
+			const string rowName = "ModPosRow_glove_base";
+			VBoxContainer row = rows.FindChild(rowName, true, false) as VBoxContainer;
+			bool fresh = row == null || !GodotObject.IsInstanceValid(row);
+			if (fresh)
+			{
+				row = new VBoxContainer();
+				row.Name = rowName;
+				row.AddThemeConstantOverride("separation", 2);
+				row.ProcessMode = Node.ProcessModeEnum.Always;
+
+				Label title = new Label();
+				title.Text = "搬运 · 底座";
+				title.AddThemeFontSizeOverride("font_size", 13);
+				title.AddThemeColorOverride("font_color", new Color(0.66f, 0.98f, 0.76f, 1f));
+				title.AddThemeColorOverride("font_outline_color", new Color(0f, 0f, 0f, 1f));
+				title.AddThemeConstantOverride("outline_size", 4);
+				row.AddChild(title, false, Node.InternalMode.Disabled);
+
+				CheckBox cb = new CheckBox();
+				cb.Name = "Toggle";
+				cb.Text = "连同花盆 / 莲叶一起移动";
+				cb.AddThemeFontSizeOverride("font_size", 14);
+				cb.CustomMinimumSize = new Vector2(0f, 32f);
+				cb.ProcessMode = Node.ProcessModeEnum.Always;
+				cb.Toggled += (bool on) =>
+				{
+					try { ApplyMoveWithBaseFromEditor(on); }
+					catch { }
+				};
+				row.AddChild(cb, false, Node.InternalMode.Disabled);
+
+				Label hint = new Label();
+				hint.Name = "Hint";
+				hint.AutowrapMode = TextServer.AutowrapMode.WordSmart;
+				hint.CustomMinimumSize = new Vector2(320f, 0f);
+				hint.AddThemeFontSizeOverride("font_size", 10);
+				hint.AddThemeColorOverride("font_color", new Color(0.78f, 0.86f, 0.95f, 1f));
+				hint.AddThemeColorOverride("font_outline_color", new Color(0f, 0f, 0f, 1f));
+				hint.AddThemeConstantOverride("outline_size", 3);
+				hint.Text = "开（默认）：植物本身种不到目的地、而它带着「符合目的地的」花盆 / 莲叶 / 花盆莲叶时，"
+					+ "连底座一起搬过去再放植物（底座放不下或植物仍放不下会自动撤回，什么都不会变）。"
+					+ "关：按原逻辑，种不下就不放。";
+				row.AddChild(hint, false, Node.InternalMode.Disabled);
+
+				rows.AddChild(row, false, Node.InternalMode.Disabled);
+			}
+
+			CheckBox cbr = row.GetNodeOrNull<CheckBox>("Toggle");
+			if (cbr != null && GodotObject.IsInstanceValid(cbr) && cbr.ButtonPressed != _moveWithBase)
+			{
+				cbr.SetPressedNoSignal(_moveWithBase);      // 不回触发 Toggled
+			}
+		}
+		catch { }
+	}
+
+	/// <summary>按共享组件的命名约定（`PanelSpec.LayerName` / `RowsName`）找本 Mod 面板的行容器。</summary>
+	private VBoxContainer FindPosRowsContainer()
+	{
+		try
+		{
+			Node root = (_tree != null && GodotObject.IsInstanceValid(_tree)) ? _tree.Root : null;
+			if (root == null || !GodotObject.IsInstanceValid(root)) { return null; }
+			string layerName = PosSpec.LayerName;
+			string rowsName = PosSpec.RowsName;
+			for (int i = 0; i < root.GetChildCount(); i++)
+			{
+				Node ch = root.GetChild(i);
+				if (!(ch is CanvasLayer cl) || !GodotObject.IsInstanceValid(cl)) { continue; }
+				if (!string.Equals(cl.Name.ToString(), layerName, StringComparison.Ordinal)) { continue; }
+				VBoxContainer rows = cl.FindChild(rowsName, true, false) as VBoxContainer;
+				if (rows != null && GodotObject.IsInstanceValid(rows)) { return rows; }
+			}
+		}
+		catch { }
+		return null;
+	}
+
+	/// <summary>面板里改了开关 ⇒ 立刻写配置（下一帧就生效）。</summary>
+	private void ApplyMoveWithBaseFromEditor(bool on)
+	{
+		try
+		{
+			_moveWithBase = on;
+			Dictionary<string, object> changes = new Dictionary<string, object>(1);
+			changes[KMoveWithBase] = on;
+			SaveSettings(changes);
+			Info("连底座移动 → " + (on ? "开" : "关") + "。");
 		}
 		catch { }
 	}
