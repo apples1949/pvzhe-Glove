@@ -3,7 +3,7 @@
 在**除「我是僵尸 / 我是僵尸大冒险」以外**的关卡里自动启用游戏自带的**搬运手套**。
 原版手套只在调试开关（`CommandManager.debugOpenGlove`）下才会出现，本 Mod 把它做成了正常玩法。
 
-- mod id：`glove`　name：`手套`　version：`1.0.6`
+- mod id：`glove`　name：`手套`　version：`1.1.0`
 - 程序集身份：`JTYGlove`（包内固定路径 `Runtime/ModAssembly.dll`）
 - 入口类型：`GloveEntry`
 
@@ -16,6 +16,7 @@
 | 按钮位置（v1.0.5：只有一套） | **横屏竖屏通用**一套 `landMode/landX/landY`。`auto` = 保持游戏原位置；`tl…br` = 九宫格；`custom` = 百分比坐标。v1.0.5 已删掉原来「竖版」那套设置（玩家反馈无效）。 |
 | 战斗设置页 | Mod 按钮列（`ModCol4`，与其它 Mod 入口同列）注入「手套 · 设置」→ 打开**本 Mod 独占**浮层面板，内含**两行**：「位置」（共享组件 `PosEditorRow.PanelSpec`）+「搬运 · 底座」（v1.0.6，CheckBox）。改动即时生效 + 写配置。 |
 | ★ 连底座移动（v1.0.6） | 配置项 `moveWithBase`（默认开）。植物本体按宿主口径放不到目的地（`CanPacketPlant == false`）时，若它脚下带着**符合目的地地形**的花盆 / 莲叶 / 花盆莲叶，就把底座一起搬过去再放植物；两层任一步不成立 ⇒ 底座原地撤回，**什么都不变**。目的地本来就能种时**完全不接管**（宿主原逻辑）。 |
+| ★ 时停中搬植物（v1.1.0） | 配置项 `allowDuringTimeStop`（默认开）。时停期间仍可点「手套」按钮 / 按 `Glove` 快捷键进入搬运模式，点植物拿起、点格子放下；僵尸 / 子弹 / 波次 / 攻击**全部保持冻结**。实现见下文「时停中搬植物」一节。 |
 | 收款码 | 每帧 `SponsorQrInjector.Tick(tree, "手套", PackageRoot, "Resources/SponsorQR.png")`；`aboutAuthor` 首行以 `手套` 逐字开头（注入器靠它判定归属）。 |
 | ★ 手套模式抑制全场植物点击（v1.0.4） | `glovePick == true` 期间，**全场植物**的 `MousePressComponent` 一律 `SetAlive(false)`（激活时扫全场、每 3 帧补悬停那株、每 0.5s 重扫），关闭/换关/卸载全部还原 ⇒ 泡椒罐子、加农炮不会被「拿起」或「放下」那一次点击触发。刚放下的那一株额外留 0.25s 窗口；拿起瞬间还会撤销植物身上可能已触发的 `pressed` / `pressAwait`。 |
 | ★ 预览用本体外观（v1.0.3） | 拖动预览不再是「按 config.name 重造默认外观」，而是 `pickedCharacter.sprite.Duplicate()` 的克隆（并补齐 `flashAnimeData` / `atlasProfileOverride` / `mediaReplaceAtlas*` 等非导出状态）⇒ 毁灭加农炮等变体显示本体外观；克隆不可用会自动回退宿主默认预览并告警。 |
@@ -175,7 +176,10 @@ v1.0.1 曾用 RenderingServer 自绘绿色半透明格 + 琥珀源格框，玩�
 ## 配置项（全部 immediate / affectsGameplay=false）
 
 `enabled`、`landMode`+`landX`+`landY`（唯一一套位置）、`moveWithBase`（v1.0.6：连花盆/莲叶一起移动）、
-`shovelWhiteMask`、`enableLog`、`aboutChangelog`、`aboutAuthor`。
+`allowDuringTimeStop`（**v1.1.0**：时停中也能搬植物，默认开）、`shovelWhiteMask`、`enableLog`、
+`aboutChangelog`、`aboutAuthor`。
+
+> 口径：正文/站点上说「共 N 项」时 N = `mod.json` 的 `settings` **排除「关于」组**后的条数（v1.1.0 = **8 项**）。
 
 ## 构建 / 装机
 
@@ -193,6 +197,49 @@ python mods/_build_locked.py Glove --install
 
 `..\..\PosEditorRow.cs`、`..\..\BattleOptionColumns.cs`、`..\..\QrCodeBitmap.cs`、`..\..\SponsorQrInjector.cs`。
 
+## 时停中搬植物（v1.1.0）
+
+> 用户原话：「检查是否可以在时停下通过手套移动植物，不能的话就改成能」。
+
+### 为什么原来不能（宿主侧实读，`unpack/` = 0.32）
+
+- 时停 = `GetTree().Paused = true`。暂停时 Godot 只派发 `ProcessMode` 为 `Always / WhenPaused` 的节点：
+  `Core/TowerDefenseManager/SubSystem/TowerDefenseProcessModeDispatch.cs:143-158`。
+- 战斗主循环挂在**状态机批次回调**上（`Scene/TowerDefesne/TowerDefenseNew/TowerDefenseControlNew.cs:309`
+  `node3.OnStatePhysicsProcessing += GameRunningProcessing`），批处理逐个用上面那条门控过滤
+  （`addons/godot_state_charts/ResourceRuntime/StateMachineRuntimeBatch.cs:186 / :194`）⇒ `GameRunningProcessing`（`:1710`）整段不跑。
+- 手套「拿起 / 落位」在链末：`Registry/Battle/Feature/Map/TowerDefenseBattleFeatureMap.cs:952-960 Process()`
+  → `:1319 ProcessInput()` → `:1352 ProcessPacketPick` / `:1354 ProcessTools` / `:1355 ProcessReleaseInput`。
+- 另外两处 `_Input` 也被暂停吞掉：`TowerDefenseControlNew._Input`（`:1172`）、`GloveManager._Input`（`GloveManager.cs:73-84` 的 `Glove` 快捷键）。
+- 本 Mod 自己挂的是 `SceneTree.process_frame` 信号 —— **暂停时照发**（TimeStop 也实测过：`TimeStopEntry.cs:554-555`），
+  所以"Mod 还在跑"但当时 `TickMoveWithBase` 里有一句 `if (tree.Paused) return;`（v1.0.6 为了防误搬），净效果就是**时停中动不了**。
+
+### 现在怎么做的（三件事）
+
+1. **进/出手套模式**：`TickTimeStopCarry()` 在暂停时轮询 `Input.IsActionJustPressed("Glove")`
+   （边沿语义，天然只触发一次），先同步 `gloveButton.ButtonPressed`（`GloveManager.SetGloveButtonPressed`），再调 `feature.GloveButtonPressed()`。
+   ⚠️ **坑**：`TowerDefenseBattleFeatureGlove.GloveButtonPressedAsync`（`:303-324`）用
+   `CreateTimer(0.1, processAlways:false)` 复位 `gloveManager.glovePressedAwait`，**暂停时这个 timer 不走**
+   ⇒ 一旦在暂停中被调用过一次，该字段永久为 `true`，之后按键彻底没反应。所以**调用前**先清 `gm.glovePressedAwait = false`（一次即充分）；
+   **非暂停时完全不碰**（那个 timer 正常跑，去清反而把 0.1 秒防抖拆掉）。
+2. **预览跟随**：每帧泵 `feature.Process(0.0)`。该方法（`TowerDefenseBattleFeatureGlove.cs:74-114`）实读只做
+   `UpdateGloveSprite`（地图手套影子跟随）与 `CanPacketPlant` 贴格预览，**不推进任何游戏逻辑**。
+3. **底座搬运放行**：`TickMoveWithBase` 的暂停早退改成 `if (paused && !_timeStopCarry) return;`，
+   于是「连同花盆/莲叶一起移动」在时停里同样生效；UI 暂停（战斗设置页 / 暂停菜单）不会置位 `_timeStopCarry`，
+   v1.0.6 修过的「拿着植物点设置页 ⇒ 植物被搬到鼠标下」不会回来。
+
+### 落位判定谁负责：**TimeStop Mod**（不是本 Mod）
+
+暂停时宿主那条 `ProcessInput()` 输入泵由「时停」Mod 每帧驱动
+（`mods/TimeStop/runtime_src/TimeStopEntry.cs:739-795`：`InvokeMethod(mapFeature, "ProcessInput")`，
+并把 `_lastInputPhysicsFrame` 重置为 `ulong.MaxValue` —— 暂停时物理帧冻结、不重置就只跑一次）。
+⇒ **本 Mod 刻意不再泵 `ProcessInput()`**，避免同一帧两边各泵一次（`ProcessGlovePlace` / `ProcessMowerInput` 双跑）。
+所以「时停中搬植物」= **TimeStop 泵输入 + Glove 接管预览/热键/底座**；两个 Mod 各有一个开关
+（TimeStop：`allowPlantMoveDuringStop`；Glove：`allowDuringTimeStop`），**任一关掉就退回对应旧行为**。
+
+> ⚠️ 未实测边界：本版**只做了静态验证**（编译 0 错误 + `verify_pmod` 通过 + DLL 特征串），
+> 按用户要求「改完不用测」，**没有进游戏实测**"时停中拖动"这一交互；上面结论全部来自源码实读与
+> 与 TimeStop 作者（compat）的交叉核对。若实机发现"能拖但落不下去"，优先看 TimeStop 侧的输入泵开关是否开着。
 ## 仍待实机验证
 
 1. 普通关卡里手套按钮是否正常出现、点击可进入搬运模式（拿起 / 放下植物）。
@@ -237,6 +284,11 @@ python mods/_build_locked.py Glove --install
     （本 Mod 不介入）；联机模式**不接管**（日志「联机模式：不接管…」）。
 19. **v1.0.6 暂停态不接管（修复）**：先用手套拿起一株带底座的植物 → 打开战斗设置页（游戏暂停）→
     在页面/面板上随便点几下 → 关掉页面回到战场：植物与底座**都必须还在原来那格**（以前会"被搬到鼠标下的格子"）。
+21. **v1.1.0 时停中搬植物**：点时停冻结战场 → 点手套按钮（或按 `Glove` 键）→ 点植物拿起 → 点目标格放下。
+    预期：植物挪动、僵尸仍全部冻结；底座搬运（若开）同样生效；再按一次 `Glove` 键应正常退出手套模式
+    （若第二次没反应，说明 `glovePressedAwait` 卡住了，把日志发作者）。
+22. **v1.1.0 UI 暂停不接管**：拿着植物 → 打开「选项 → 战斗设置」→ 在面板上随便点几下 → 关掉设置页：
+    植物必须仍在原格（这是 v1.0.6 修过、本版必须保持的行为）。
 20. **v1.0.6 落盘可自证**：每次在面板里改「位置」或「搬运 · 底座」，`godot.log` 都应出现
     `[Glove] 配置已落盘：<键>=<值>`（这条不受 `enableLog` 门控）；重启游戏后面板里的勾选与位置应保持。
     若出现 `[Glove] 配置保存失败：…`，说明是宿主保存管道拒绝（消息带原因），把这一行发给作者即可定位。

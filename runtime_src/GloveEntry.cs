@@ -95,6 +95,12 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 	/// </summary>
 	private const string KMoveWithBase = "moveWithBase";
 
+	/// <summary>
+	/// ★ v1.1.0：**时停中也能用手套搬植物**（默认开）。
+	/// 关闭 ⇒ 完全回到 v1.0.6 的行为（暂停中不接管任何东西）。
+	/// </summary>
+	private const string KAllowDuringTimeStop = "allowDuringTimeStop";
+
 	/// <summary>手套 Feature 的注册名（`TowerDefenseBattleRegistry` 里的字符串）。</summary>
 	private const string GloveFeatureName = "Glove";
 
@@ -180,6 +186,24 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 
 	/// <summary>★ v1.0.6：连同底座（花盆 / 莲叶 / 花盆莲叶）一起移动（默认开）。</summary>
 	private bool _moveWithBase = true;
+
+	/// <summary>★ v1.1.0：时停中也能用手套搬植物（默认开）。关闭 ⇒ 回到 v1.0.6 行为。</summary>
+	private bool _allowDuringTimeStop = true;
+
+	/// <summary>
+	/// ★ v1.1.0：本帧是否正由本 Mod「接管时停搬运」。
+	/// 供 `TickMoveWithBase` 在暂停时决定要不要放行（只有这里为 true 才放行）。
+	/// </summary>
+	private bool _timeStopCarry;
+
+	/// <summary>
+	/// ★ v1.1.0：当前暂停是不是「战斗设置页 / 暂停菜单」这类 **UI 暂停**（每 poll 帧重算）。
+	/// 这类暂停**不接管**（v1.0.6 修过的"拿着植物点设置页 ⇒ 植物被搬到鼠标下"就是它）。
+	/// </summary>
+	private bool _uiPauseBlock;
+
+	/// <summary>时停接管异常只报一次。</summary>
+	private bool _timeStopErrLogged;
 
 	// ── v1.0.2：铲子 / 手套 互斥（宿主 `PacketPickControl.ProcessTools`（:1221-1251）只处理
 	//    "选卡 vs 工具"，**不处理工具之间互斥** ⇒ 两个工具能同时处于 picking 状态，
@@ -319,7 +343,7 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 			// ★ 不受 enableLog 门控：每次启动只打 1 行，用来确认"包真的加载且入口跑起来了"。
 			try
 			{
-				GD.Print(LogPrefix + "v1.0.6 ready（手套；enableLog=" + (_log ? "on" : "off") + "）");
+				GD.Print(LogPrefix + "v1.1.0 ready（手套；enableLog=" + (_log ? "on" : "off") + "）");
 			}
 			catch { }
 			Info("已挂载 process_frame（每 " + ScanStride + " 帧轮询一次「启用手套 / 设置页按钮」。");
@@ -385,6 +409,7 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 			_landY = ReadInt(KLandY, 2, 0, 100);
 			_shovelWhiteMask = ReadBool(KShovelWhiteMask, true);
 			_moveWithBase = ReadBool(KMoveWithBase, true);
+			_allowDuringTimeStop = ReadBool(KAllowDuringTimeStop, true);
 			_log = ReadBool(KEnableLog, false);
 		}
 		catch { }
@@ -586,7 +611,18 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 			}
 		}
 
-		// ★ v1.0.6：⑤ 目的地种不下时，按开关决定是否"连底座（花盆/莲叶/花盆莲叶）一起搬"。
+		// ★ v1.1.0：⑤ 时停中接管（**必须在 TickMoveWithBase 之前**：它读 `_timeStopCarry`）
+		try { TickTimeStopCarry(poll); }
+		catch (Exception ex)
+		{
+			if (!_timeStopErrLogged)
+			{
+				_timeStopErrLogged = true;
+				SafeWarn("时停接管异常（本条只报一次）：" + ex.Message);
+			}
+		}
+
+		// ★ v1.0.6：⑥ 目的地种不下时，按开关决定是否"连底座（花盆/莲叶/花盆莲叶）一起搬"。
 		//   放在最后：宿主是先处理输入（`ProcessTools → ProcessGlovePlace`）再跑本帧的，
 		//   所以这里看到的一定是"宿主已经决定不放"之后的状态（详见 TickMoveWithBase 注释）。
 		try { TickMoveWithBase(); }
@@ -2274,6 +2310,165 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 		_previewClone = null;
 	}
 
+	// ================================================================ 时停中搬植物（v1.1.0）
+
+	/// <summary>
+	/// ★ v1.1.0（用户需求「检查是否可以在时停下通过手套移动植物，不能的话就改成能」）：
+	/// **时停中用手套搬植物** 的接管帧逻辑。
+	///
+	/// ── 为什么需要它（宿主侧实读，`unpack\` = 0.32）──────────────────────────
+	/// · 时停 = `GetTree().Paused = true`。暂停时 Godot 只派发 `Always / WhenPaused` 节点：
+	///   `TowerDefenseProcessModeDispatch.cs:143-158`；战斗主循环挂在状态机批次上并被它过滤
+	///   （`TowerDefenseControlNew.cs:309` + `StateMachineRuntimeBatch.cs:186/194`）⇒ 暂停后整段不跑。
+	/// · 手套的"拿起/落位"在链末：`TowerDefenseBattleFeatureMap.Process`（`:952-960`）→
+	///   `ProcessInput()`（`:1319`）→ `ProcessPacketPick`(`:1352`) / `ProcessTools`(`:1354`) / `ProcessReleaseInput`(`:1355`)。
+	///   ⚠️ **这条输入泵由 TimeStop Mod 负责**（`TimeStopEntry.cs:739-795`，它每帧
+	///   `InvokeMethod(mapFeature, "ProcessInput")` 并把 `_lastInputPhysicsFrame` 重置为 `ulong.MaxValue`，
+	///   因为暂停时物理帧冻结、不重置就只跑一次）。**本 Mod 不再重复泵**，避免同帧双跑
+	///   `ProcessGlovePlace` / `ProcessMowerInput`（与 compat 约定：泵归 TimeStop，接管归本 Mod）。
+	/// · 本 Mod 自己挂的是 `SceneTree.process_frame` 信号 —— **暂停时照发**（TimeStop 亦实测，
+	///   `TimeStopEntry.cs:554-555`）⇒ 所以下面这些能在这里做。
+	///
+	/// ── 本方法补的三件事（都是暂停时宿主不会替我们做的）─────────────────────
+	///   ① **进/出手套模式**：`GloveManager._Input`（`GloveManager.cs:73-84`）与
+	///      `TowerDefenseControlNew._Input`（`:1172`）都是 Pausable 回调，暂停收不到 ⇒ 这里轮询
+	///      `Input.IsActionJustPressed("Glove")`（边沿语义，天然只触发一次）后自己调用。
+	///      ⚠️ 坑（compat 实测）：`GloveButtonPressedAsync`（`TowerDefenseBattleFeatureGlove.cs:303-324`）
+	///      用 `CreateTimer(0.1, processAlways:false)` 复位 `gloveManager.glovePressedAwait`，
+	///      **暂停时这个 timer 不走** ⇒ 一旦在暂停中被调用过一次，该字段永久为 true、之后按键彻底没反应。
+	///      ⇒ **调用前**清一次（清一次即充分：既解残局卡死，又保证本次能进 `else if (!glovePressedAwait)` 分支）。
+	///      非暂停时**完全不碰**（那个 timer 正常跑，去清反而拆掉防抖）。
+	///   ② **预览跟随**：`GloveManager` 的地图手套影子 / 预览精灵靠
+	///      `TowerDefenseBattleFeatureGlove.Process`（`:74-114`）每帧定位；它同样被暂停冻住。
+	///      这里每帧泵一次（该方法实读只做 `UpdateGloveSprite` 与 `CanPacketPlant` 贴格，**不推进任何游戏逻辑**）。
+	///   ③ **底座搬运放行**：`TickMoveWithBase` 原本 `if (paused) return;`，这里把 `_timeStopCarry` 置位让它放行。
+	///
+	/// ── 不接管的情形（重要，别把 v1.0.6 的 bug 放回来）─────────────────────
+	///   · `allowDuringTimeStop` 关 ⇒ 完全不接管（等于 v1.0.6）；
+	///   · **UI 暂停**（战斗设置页 `BattleOption*` / 暂停菜单 `*Pause*`）⇒ 不接管。
+	///     玩家"手里拿着植物 → 打开设置页 → 在面板上点一下"时 `IsConfirmInput()` 仍为 true
+	///     （引擎级 Input 动作不受 UI 消费影响），不排除这条就会把植物搬到鼠标下。
+	///   · 手套不在搬运态（`glovePick == false` 且没有 `pickedCharacter`）⇒ 不泵预览、不放行底座。
+	///
+	/// ── 时停语义不破 ─────────────────────────────────────────────────
+	/// 这里只调 `feature.Process`（纯预览）+ 手套按钮切换；**僵尸/波次/攻击/子弹仍在状态机批次里，
+	/// 继续被 `ShouldDispatch` 挡着**（`StateMachineRuntimeBatch.cs:194`），所以僵尸照样冻结。
+	/// </summary>
+	private void TickTimeStopCarry(bool poll)
+	{
+		bool paused = false;
+		try { paused = _tree != null && GodotObject.IsInstanceValid(_tree) && _tree.Paused; } catch { }
+		if (!paused)
+		{
+			_timeStopCarry = false;
+			_uiPauseBlock = false;
+			return;
+		}
+
+		// UI 暂停缓存：每 poll 帧重算（树遍历只在这一条路径上，且只在暂停时）
+		if (poll) { _uiPauseBlock = IsUiPauseBlocking(); }
+
+		if (!_allowDuringTimeStop) { _timeStopCarry = false; return; }
+		if (_uiPauseBlock) { _timeStopCarry = false; return; }
+
+		TowerDefenseBattleFeatureGlove feature = null;
+		try
+		{
+			TowerDefenseManager mgr = TowerDefenseManager.Instance;
+			if (mgr != null && GodotObject.IsInstanceValid(mgr)) { feature = mgr.GetGloveFeature(); }
+		}
+		catch { }
+		if (feature == null || !GodotObject.IsInstanceValid(feature)) { _timeStopCarry = false; return; }
+
+		// ① 快捷键进/出（暂停时宿主的两处 `_Input` 都不跑）
+		bool hotkey = false;
+		try { hotkey = Input.IsActionJustPressed("Glove"); } catch { }
+		if (hotkey) { ToggleGloveByHotkeyWhilePaused(feature); }
+
+		// ② 只有"手套在搬运态"才接管（避免暂停时干扰其它工具 / 选卡）
+		bool active = false;
+		try
+		{
+			active = feature.glovePick
+				|| (feature.pickedCharacter != null && GodotObject.IsInstanceValid(feature.pickedCharacter));
+		}
+		catch { }
+		_timeStopCarry = active;
+		if (!active) { return; }
+
+		// ③ 泵"预览 / 地图手套影子"（不推进游戏逻辑）
+		try { feature.Process(0.0); } catch { }
+	}
+
+	/// <summary>
+	/// 暂停中用快捷键切手套模式。
+	/// 顺序刻意是：**先清 `glovePressedAwait` → 再同步按钮 → 最后调用**（见 `TickTimeStopCarry` 注释里的坑）。
+	/// `GloveManager` 的这几个成员都是 public 字段/方法（`GloveManager.cs:12 glovePressedAwait`、
+	/// `:145 SetGloveButtonPressed`、`:153 IsGloveButtonPressed`），不需要反射。
+	/// </summary>
+	private void ToggleGloveByHotkeyWhilePaused(TowerDefenseBattleFeatureGlove feature)
+	{
+		try
+		{
+			GloveManager gm = null;
+			try { gm = feature.gloveManager; } catch { }
+			if (gm == null || !GodotObject.IsInstanceValid(gm)) { return; }
+
+			// ★ 调用前清（暂停时那个 0.1s timer 永远不会跑）
+			try { gm.glovePressedAwait = false; } catch { }
+
+			// 按钮视觉与实际模式保持一致：`GloveButtonPressed()` 内部读 `IsGloveButtonPressed()` 决定开/关
+			bool want = true;
+			try { want = !gm.IsGloveButtonPressed(); } catch { }
+			try { gm.SetGloveButtonPressed(want); } catch { }
+
+			try { feature.GloveButtonPressed(); } catch { }
+
+			Info("时停中：快捷键切换手套模式 → " + (want ? "开" : "关")
+				+ "（暂停态 _Input 不跑，由本 Mod 代劳；僵尸仍冻结）。");
+		}
+		catch (Exception ex)
+		{
+			if (!_timeStopErrLogged)
+			{
+				_timeStopErrLogged = true;
+				SafeWarn("时停中切换手套异常（本条只报一次）：" + ex.Message);
+			}
+		}
+	}
+
+	/// <summary>
+	/// 当前这棵树是不是被 **UI 暂停** 了（战斗设置页 / 暂停菜单）。
+	/// 这两类暂停**不接管**（见 `TickTimeStopCarry` 注释里的 v1.0.6 误搬 bug）。
+	/// 只在暂停期间、且每 `ScanStride` 帧调用一次。
+	/// </summary>
+	private bool IsUiPauseBlocking()
+	{
+		try
+		{
+			if (_tree == null || !GodotObject.IsInstanceValid(_tree)) { return false; }
+			Node root = _tree.Root;
+			if (root == null || !GodotObject.IsInstanceValid(root)) { return false; }
+
+			// ① 战斗设置页（`BattleOption*`）—— 复用已有的递归收集，命中 1 个就够
+			List<Node> opts = new List<Node>(1);
+			CollectBattleOptionDialogs(root, opts, 1, 0);
+			if (opts.Count > 0) { return true; }
+
+			// ② 暂停菜单（`TowerDefenseControlNew.OpenGamePauseDialog` → `DialogManager.DialogCreate("Pause")`）
+			int n = root.GetChildCount();
+			for (int i = 0; i < n; i++)
+			{
+				Node ch = root.GetChild(i);
+				if (ch == null || !GodotObject.IsInstanceValid(ch)) { continue; }
+				string nm = ch.Name.ToString();
+				if (nm.IndexOf("Pause", StringComparison.Ordinal) >= 0) { return true; }
+			}
+		}
+		catch { }
+		return false;
+	}
+
 	// ================================================================ 连底座移动（v1.0.6）
 
 	/// <summary>
@@ -2328,7 +2523,13 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 		//   联机模式下 `BattleOption._Ready` 会把 pause 关掉 ⇒ 不会挡正常用法。
 		bool paused = false;
 		try { paused = _tree != null && GodotObject.IsInstanceValid(_tree) && _tree.Paused; } catch { }
-		if (paused) { return; }
+		if (paused)
+		{
+			// ★ v1.1.0：允许"时停中搬植物"时**不再一律早退**（否则底座搬运在时停里必然失效）。
+			//   但仍然只在 `_timeStopCarry` 为真（= 本 Mod 正在接管时停搬运，且不是 UI 暂停）时放行；
+			//   战斗设置页 / 暂停菜单那类暂停不会置位 ⇒ v1.0.6 修过的"拿着植物点设置页被搬走"不会回来。
+			if (!_timeStopCarry) { return; }
+		}
 
 		TowerDefenseBattleFeatureGlove feature = null;
 		TowerDefenseCharacter picked = null;
@@ -2847,6 +3048,9 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 			//   共享组件只用来把面板/行容器建好，这一行是我们自己往容器里追加的 ——
 			//   **不改共享组件一个字节**。
 			EnsureMoveWithBaseRow();
+
+			// ★ v1.1.0：同一面板再加一行「时停 · 搬运」（CheckBox 开关 allowDuringTimeStop）。
+			EnsureTimeStopRow();
 		}
 		catch (Exception ex)
 		{
@@ -2948,9 +3152,93 @@ public sealed partial class GloveEntry : IXWModRuntimeEntry
 		catch { }
 	}
 
-	/// <summary>按共享组件的命名约定（`PanelSpec.LayerName` / `RowsName`）找本 Mod 面板的行容器。</summary>
-	private VBoxContainer FindPosRowsContainer()
+	// ================================================================ 「时停 · 搬运」面板行（v1.1.0）
+
+	/// <summary>
+	/// ★ v1.1.0：在**本 Mod 自己的面板**里追加一行「时停 · 搬运」—— CheckBox 直接开关
+	/// `allowDuringTimeStop`（改动即时写配置，下一帧 `TickTimeStopCarry` 就用新值）。
+	/// 写法与「搬运 · 底座」那一行完全一致（共享组件一个字节没改）。
+	/// </summary>
+	private void EnsureTimeStopRow()
 	{
+		try
+		{
+			VBoxContainer rows = FindPosRowsContainer();
+			if (rows == null || !GodotObject.IsInstanceValid(rows)) { return; }
+
+			const string rowName = "ModPosRow_glove_timestop";
+			VBoxContainer row = rows.FindChild(rowName, true, false) as VBoxContainer;
+			bool fresh = row == null || !GodotObject.IsInstanceValid(row);
+			if (fresh)
+			{
+				row = new VBoxContainer();
+				row.Name = rowName;
+				row.AddThemeConstantOverride("separation", 2);
+				row.ProcessMode = Node.ProcessModeEnum.Always;
+
+				Label title = new Label();
+				title.Text = "时停 · 搬运";
+				title.AddThemeFontSizeOverride("font_size", 13);
+				title.AddThemeColorOverride("font_color", new Color(0.66f, 0.98f, 0.76f, 1f));
+				title.AddThemeColorOverride("font_outline_color", new Color(0f, 0f, 0f, 1f));
+				title.AddThemeConstantOverride("outline_size", 4);
+				row.AddChild(title, false, Node.InternalMode.Disabled);
+
+				CheckBox cb = new CheckBox();
+				cb.Name = "Toggle";
+				cb.Text = "时停中也能搬植物（僵尸仍冻结）";
+				cb.AddThemeFontSizeOverride("font_size", 14);
+				cb.CustomMinimumSize = new Vector2(0f, 32f);
+				cb.ProcessMode = Node.ProcessModeEnum.Always;
+				cb.Toggled += (bool on) =>
+				{
+					try { ApplyAllowDuringTimeStopFromEditor(on); }
+					catch { }
+				};
+				row.AddChild(cb, false, Node.InternalMode.Disabled);
+
+				Label hint = new Label();
+				hint.Name = "Hint";
+				hint.AutowrapMode = TextServer.AutowrapMode.WordSmart;
+				hint.CustomMinimumSize = new Vector2(320f, 0f);
+				hint.AddThemeFontSizeOverride("font_size", 10);
+				hint.AddThemeColorOverride("font_color", new Color(0.78f, 0.86f, 0.95f, 1f));
+				hint.AddThemeColorOverride("font_outline_color", new Color(0f, 0f, 0f, 1f));
+				hint.AddThemeConstantOverride("outline_size", 3);
+				hint.Text = "开（默认）：时停期间也能用手套拿起 / 放下植物（快捷键 "
+					+ "Glove 键同样可用）；僵尸、子弹、波次仍然全部冻结，只是植物可以被挪动。"
+					+ "关：时停期间手套完全不响应（与旧版一致）。"
+					+ "需要同时装「时停」Mod（它负责在暂停时驱动放置判定）。";
+				row.AddChild(hint, false, Node.InternalMode.Disabled);
+
+				rows.AddChild(row, false, Node.InternalMode.Disabled);
+			}
+
+			CheckBox cbr = row.GetNodeOrNull<CheckBox>("Toggle");
+			if (cbr != null && GodotObject.IsInstanceValid(cbr) && cbr.ButtonPressed != _allowDuringTimeStop)
+			{
+				cbr.SetPressedNoSignal(_allowDuringTimeStop);   // 不回触发 Toggled
+			}
+		}
+		catch { }
+	}
+
+	/// <summary>「时停 · 搬运」那一行改动 ⇒ 立刻写配置（下一帧就生效）。</summary>
+	private void ApplyAllowDuringTimeStopFromEditor(bool on)
+	{
+		try
+		{
+			_allowDuringTimeStop = on;
+			Dictionary<string, object> changes = new Dictionary<string, object>(1);
+			changes[KAllowDuringTimeStop] = on;
+			SaveSettings(changes);
+			Info("时停中搬植物 → " + (on ? "开" : "关") + "。");
+		}
+		catch { }
+	}
+
+	/// <summary>按共享组件的命名约定（`PanelSpec.LayerName` / `RowsName`）找本 Mod 面板的行容器。</summary>
+	private VBoxContainer FindPosRowsContainer()	{
 		try
 		{
 			Node root = (_tree != null && GodotObject.IsInstanceValid(_tree)) ? _tree.Root : null;
